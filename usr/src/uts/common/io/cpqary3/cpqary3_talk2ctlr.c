@@ -11,6 +11,7 @@
 
 /*
  * Copyright (C) 2013 Hewlett-Packard Development Company, L.P.
+ * Copyright 2016 Joyent, Inc.
  */
 
 /*
@@ -284,53 +285,32 @@ cpqary3_poll_retrieve(cpqary3_t *cpqary3p, uint32_t poll_tag)
  * Calls	: 	None
  * Return Values: 	None
  */
-int32_t
+int
 cpqary3_submit(cpqary3_t *cpqary3p, uint32_t cmd_phyaddr)
 {
-	uint32_t		phys_addr = 0;
-	uint8_t			retval  = 0;
+	ASSERT(cpqary3p != NULL);
+	ASSERT(MUTEX_HELD(&cpqary3p->hw_mutex));
+
+	/*
+	 * If a controller lockup has been detected, reject new command
+	 * submissions.
+	 */
+	if (cpqary3p->controller_lockup == CPQARY3_TRUE) {
+		return (EIO);
+	}
 
 	/*
 	 * Write the Physical Address of the command-to-be-submitted
 	 * into the Controller's Inbound Post Q.
 	 */
-
-	ASSERT(cpqary3p != NULL);
-
-#ifdef AMD64_DEBUG
-	{
-	char		debug_char;
-	uint32_t	tmp_cmd_phyaddr;
-
-	tmp_cmd_phyaddr = (uint32_t)(cmd_phyaddr & 0XFFFFFFFF);
-
-	cmn_err(CE_WARN, "CPQary3: cmd_phyaddr = %lX\n tmp_cmd_phyaddr = %lX",
-	    cmd_phyaddr, tmp_cmd_phyaddr);
-
-	debug_enter(&debug_char);
-	ddi_put32(cpqary3p->ipq_handle, (uint32_t *)cpqary3p->ipq, cmd_phyaddr);
-	}
-#endif
-
-
-	/* CONTROLLER_LOCKUP */
-	if (cpqary3p->controller_lockup == CPQARY3_TRUE) {
-		retval = EIO;
-		return (retval);
-	}
-	/* CONTROLLER_LOCKUP */
-
 	if (!(cpqary3p->bddef->bd_flags & SA_BD_SAS)) {
-		ddi_put32(cpqary3p->ipq_handle,
-		    (uint32_t *)cpqary3p->ipq, cmd_phyaddr);
+		ddi_put32(cpqary3p->ipq_handle, cpqary3p->ipq, cmd_phyaddr);
 	} else {
 		/* The driver always uses the 0th block fetch count always */
-		phys_addr = cmd_phyaddr | 0 | 0x1;
-		ddi_put32(cpqary3p->ipq_handle,
-		    (uint32_t *)cpqary3p->ipq, phys_addr);
-	}
+		uint32_t phys_addr = cmd_phyaddr | 0 | 0x1;
 
-	/* PERF */
+		ddi_put32(cpqary3p->ipq_handle, cpqary3p->ipq, phys_addr);
+	}
 
 	/*
 	 * Command submission can NEVER FAIL since the number of commands that
@@ -338,11 +318,7 @@ cpqary3_submit(cpqary3_t *cpqary3p, uint32_t cmd_phyaddr)
 	 * allocation is for 225 commands ONLY. Thus, at any given time the
 	 * maximum number of commands in the controller is 225.
 	 */
-
-	/* CONTROLLER_LOCKUP */
-	return (retval);
-	/* CONTROLLER_LOCKUP */
-
+	return (0);
 }
 
 
@@ -358,29 +334,24 @@ cpqary3_submit(cpqary3_t *cpqary3p, uint32_t cmd_phyaddr)
 void
 cpqary3_intr_onoff(cpqary3_t *cpqary3p, uint8_t flag)
 {
-	uint32_t	intr = 0;
-	uint32_t	intr_mask = 0;
+	/*
+	 * Read the Interrupt Mask Register.
+	 */
+	uint32_t imr = ddi_get32(cpqary3p->imr_handle, cpqary3p->imr);
 
 	/*
-	 * Enable or disable the interrupt based on the flag
-	 * Read the Interrupt Mask Register first and then update it
-	 * accordingly
+	 * Enable or disable interrupts from the controller based on the flag.
 	 */
-
-	ASSERT(cpqary3p != NULL);
-
-	intr = ddi_get32(cpqary3p->imr_handle, (uint32_t *)cpqary3p->imr);
-	intr_mask = cpqary3p->bddef->bd_intrmask;
-
 	if (flag == CPQARY3_INTR_ENABLE) {
-		ddi_put32(cpqary3p->imr_handle,
-		    (uint32_t *)cpqary3p->imr, intr & ~(intr_mask));
+		imr &= ~cpqary3p->bddef->bd_intrmask;
 	} else {
-		ddi_put32(cpqary3p->imr_handle,
-		    (uint32_t *)cpqary3p->imr, (intr | intr_mask));
-	}
-}
+		VERIFY(flag == CPQARY3_INTR_DISABLE);
 
+		imr |= cpqary3p->bddef->bd_intrmask;
+	}
+
+	ddi_put32(cpqary3p->imr_handle, cpqary3p->imr, imr);
+}
 
 /*
  * Function	: 	cpqary3_lockup_intr_onoff
@@ -395,27 +366,139 @@ cpqary3_intr_onoff(cpqary3_t *cpqary3p, uint8_t flag)
 void
 cpqary3_lockup_intr_onoff(cpqary3_t *cpqary3p, uint8_t flag)
 {
-	uint32_t	intr = 0;
-	uint32_t	intr_lockup_mask = 0;
+	/*
+	 * Read the Interrupt Mask Register.
+	 */
+	uint32_t imr = ddi_get32(cpqary3p->imr_handle, cpqary3p->imr);
 
 	/*
-	 * Enable or disable the interrupt based on the flag
-	 * Read the Interrupt Mask Register first and then update it
-	 * accordingly
+	 * Enable or disable firmware lockup interrupts from the controller
+	 * based on the flag.
 	 */
-
-	ASSERT(cpqary3p != NULL);
-
-	intr = ddi_get32(cpqary3p->imr_handle, (uint32_t *)cpqary3p->imr);
-	intr_lockup_mask = cpqary3p->bddef->bd_lockup_intrmask;
-
-	if (flag == CPQARY3_INTR_ENABLE) {
-		ddi_put32(cpqary3p->imr_handle,
-		    (uint32_t *)cpqary3p->imr, intr & ~(intr_lockup_mask));
+	if (flag == CPQARY3_LOCKUP_INTR_ENABLE) {
+		imr &= ~cpqary3p->bddef->bd_lockup_intrmask;
 	} else {
-		ddi_put32(cpqary3p->imr_handle,
-		    (uint32_t *)cpqary3p->imr, (intr | intr_lockup_mask));
+		VERIFY(flag == CPQARY3_LOCKUP_INTR_DISABLE);
+
+		imr |= cpqary3p->bddef->bd_lockup_intrmask;
 	}
+
+	ddi_put32(cpqary3p->imr_handle, cpqary3p->imr, imr);
+}
+
+/*
+ * Signal to the controller that we have updated the Configuration Table by
+ * writing to the Inbound Doorbell Register.  The controller will, after some
+ * number of seconds, acknowledge this by clearing the bit.
+ *
+ * If successful, return CPQARY3_SUCCESS.  If the controller takes too long to
+ * acknowledge, return CPQARY3_FAILURE.
+ */
+static int
+cpqary3_cfgtbl_flush(cpqary3_t *cpqary3p)
+{
+	/*
+	 * Read the current value of the Inbound Doorbell Register.
+	 */
+	uint32_t idr = ddi_get32(cpqary3p->idr_handle, cpqary3p->idr);
+
+	/*
+	 * Signal the Configuration Table change to the controller.
+	 */
+	idr |= CISS_IDR_BIT_CFGTBL_CHANGE;
+	ddi_put32(cpqary3p->idr_handle, cpqary3p->idr, idr);
+
+	/*
+	 * Wait for the controller to acknowledge the change.
+	 */
+	for (unsigned i = 0; i < CISS_INIT_TIME; i++) {
+		idr = ddi_get32(cpqary3p->idr_handle, cpqary3p->idr);
+
+		if ((idr & CISS_IDR_BIT_CFGTBL_CHANGE) == 0) {
+			return (CPQARY3_SUCCESS);
+		}
+
+		/*
+		 * Wait for one second before trying again.
+		 */
+		delay(drv_usectohz(1000000));
+	}
+
+	dev_err(cpqary3p->dip, CE_WARN, "time out expired before controller "
+	    "configuration completed");
+	return (CPQARY3_FAILURE);
+}
+
+static int
+cpqary3_cfgtbl_transport_has_support(cpqary3_t *cpqary3p, int xport)
+{
+	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
+	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
+
+	/*
+	 * Read the current value of the TransportSupport field in the
+	 * Configuration Table.
+	 */
+	uint32_t xport_active = ddi_get32(cpqary3p->ct_handle,
+	    &cpqary3p->ct->TransportSupport);
+
+	/*
+	 * Check that the desired transport method is supported by the
+	 * controller:
+	 */
+	if ((xport_active & xport) == 0) {
+		dev_err(cpqary3p->dip, CE_WARN, "controller does not support "
+		    "method \"%s\"", xport == CISS_CFGTBL_XPORT_SIMPLE ?
+		    "simple" : "performant");
+		return (CPQARY3_FAILURE);
+	}
+
+	return (CPQARY3_SUCCESS);
+}
+
+static void
+cpqary3_cfgtbl_transport_set(cpqary3_t *cpqary3p, int xport)
+{
+	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
+	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
+
+	ddi_put32(cpqary3p->ct_handle,
+	    &cpqary3p->ct->HostWrite.TransportRequest, xport);
+}
+
+static int
+cpqary3_cfgtbl_transport_confirm(cpqary3_t *cpqary3p, int xport)
+{
+	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
+	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
+
+	/*
+	 * Read the current value of the TransportActive field in the
+	 * Configuration Table.
+	 */
+	uint32_t xport_active = ddi_get32(cpqary3p->ct_handle,
+	    &cpqary3p->ct->TransportActive);
+
+	/*
+	 * Check that the desired transport method is now active:
+	 */
+	if ((xport_active & xport) == 0) {
+		dev_err(cpqary3p->dip, CE_WARN, "failed to enable transport "
+		    "method \"%s\"", xport == CISS_CFGTBL_XPORT_SIMPLE ?
+		    "simple" : "performant");
+		return (CPQARY3_FAILURE);
+	}
+
+	/*
+	 * Ensure that the controller is now ready to accept commands.
+	 */
+	if ((xport_active & CISS_CFGTBL_READY_FOR_COMMANDS) == 0) {
+		dev_err(cpqary3p->dip, CE_WARN, "controller not ready to "
+		    "accept commands");
+		return (CPQARY3_FAILURE);
+	}
+
+	return (CPQARY3_SUCCESS);
 }
 
 /*
@@ -433,9 +516,8 @@ cpqary3_lockup_intr_onoff(cpqary3_t *cpqary3p, uint8_t flag)
 uint8_t
 cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 {
-	uint8_t				cntr;
 	uint8_t				signature[4] = { 'C', 'I', 'S', 'S' };
-	volatile CfgTable_t		*ctp;
+	CfgTable_t			*ctp;
 	volatile CfgTrans_Perf_t	*perf_cfg;
 	cpqary3_phyctg_t		*cpqary3_phyctgp;
 	uint32_t			phy_addr;
@@ -469,21 +551,18 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 	DTRACE_PROBE1(ctlr_init_start, CfgTable_t *, ctp);
 
 	/*
-	 * Validate the signature - should be "CISS"
-	 * Use of cntr in the for loop does not suggest a counter - it just
-	 * saves declaration of another variable.
+	 * The configuration table contains an ASCII signature ("CISS") which
+	 * should be checked as we initialise the controller.
+	 * See: "9.1 Configuration Table" in CISS Specification.
 	 */
-
-	for (cntr = 0; cntr < 4; cntr++) {
-		if (DDI_GET8(cpqary3p, &ctp->Signature[cntr]) !=
-		    signature[cntr]) {
-			cmn_err(CE_WARN, "CPQary3 : Controller NOT ready");
-			cmn_err(CE_WARN, "CPQary3 : _cpqary3_init_ctlr : "
-			    "Signature not stamped");
+	for (unsigned i = 0; i < 4; i++) {
+		if (ddi_get8(cpqary3p->ct_handle, &ctp->Signature[i]) !=
+		    signature[i]) {
+			dev_err(cpqary3p->dip, CE_WARN, "invalid signature "
+			    "detected");
 			return (CPQARY3_FAILURE);
 		}
 	}
-
 
 	if (!(cpqary3p->bddef->bd_flags & SA_BD_SAS)) {
 		CmdsOutMax = DDI_GET32(cpqary3p, &ctp->CmdsOutMax);
@@ -520,91 +599,30 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 
 		/* PERF */
 
-		/*
-		 * Check for support of SIMPLE Transport Method
-		 */
-		if (!(DDI_GET32(cpqary3p, &ctp->TransportSupport) &
-		    CFGTBL_XPORT_SIMPLE)) {
-			cmn_err(CE_WARN, "CPQary3 : Controller "
-			    "NOT YET INITIALIZED");
-			cmn_err(CE_CONT, "CPQary3 : For Hot Plug Operations, "
-			    "try again later \n");
+		if (cpqary3_cfgtbl_transport_has_support(cpqary3p,
+		    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
 			return (CPQARY3_FAILURE);
 		}
 
 		/*
-		 * Configuration Table Initialization
-		 * Set bit 0 of InBound Door Bell Reg to inform the controller
-		 * about the changes related to the Configuration table
+		 * Set the Transport Method and flush the changes to the
+		 * Configuration Table.
 		 */
-		DTRACE_PROBE(cfgtable_init_start);
-
-		DDI_PUT32(cpqary3p, &ctp->HostWrite.TransportRequest,
-		    CFGTBL_XPORT_SIMPLE);
-		ddi_put32(cpqary3p->idr_handle, (uint32_t *)cpqary3p->idr,
-		    ddi_get32(cpqary3p->idr_handle, (uint32_t *)cpqary3p->idr) |
-		    CFGTBL_CHANGE_REQ);
-
-		/*
-		 * Check whether the controller is  ready
-		 */
-
-		cntr = 0;
-		while (ddi_get32(cpqary3p->idr_handle,
-		    (uint32_t *)cpqary3p->idr) & CFGTBL_ACC_CMDS) {
-			drv_usecwait(1000000); /* Wait for 1 Sec. */
-			cntr++;
-
-			/*
-			 * Wait for a maximum of 90 seconds. No f/w should take
-			 * more than 90 secs to initialize. If the controller
-			 * is not ready even after 90 secs, it suggests that
-			 * something is wrong
-			 * (wrt the controller, what else) !!!
-			 */
-
-			if (cntr > CISS_INIT_TIME) /* 1.30 Mins */ {
-				cmn_err(CE_CONT, "CPQary3 : Controller "
-				    "Initialization Failed \n");
-				return (CPQARY3_FAILURE);
-			}
-		}
-
-		DTRACE_PROBE(cfgtable_init_done);
-
-		/*
-		 * Check whether controller accepts the requested method of
-		 * transport
-		 */
-		if (!(DDI_GET32(cpqary3p, &ctp->TransportActive) &
-		    CFGTBL_XPORT_SIMPLE)) {
-			cmn_err(CE_CONT, "CPQary3 : Failed to Initialize "
-			    "Controller \n");
-			cmn_err(CE_CONT, "CPQary3 : For Hot Plug Operations, "
-			    "try again later\n");
+		cpqary3_cfgtbl_transport_set(cpqary3p,
+		    CISS_CFGTBL_XPORT_SIMPLE);
+		if (cpqary3_cfgtbl_flush(cpqary3p) != CPQARY3_SUCCESS) {
 			return (CPQARY3_FAILURE);
 		}
 
-		DTRACE_PROBE(ctlr_init_simple);
-
-		/*
-		 * Check if Controller is ready to accept Commands
-		 */
-
-		if (!(DDI_GET32(cpqary3p, &ctp->TransportActive) &
-		    CFGTBL_ACC_CMDS)) {
-			cmn_err(CE_CONT, "CPQary3: Controller NOT ready to "
-			    "accept Commands \n");
+		if (cpqary3_cfgtbl_transport_confirm(cpqary3p,
+		    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
 			return (CPQARY3_FAILURE);
 		}
-
-		DTRACE_PROBE(ctlr_init_ready);
 
 		/*
 		 * Check if the maximum number of oustanding commands for the
 		 * initialized controller is something greater than Zero.
 		 */
-
 		CmdsOutMax = DDI_GET32(cpqary3p, &ctp->CmdsOutMax);
 
 		if (CmdsOutMax == 0) {
@@ -619,7 +637,6 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		/*
 		 * Zero the Upper 32 Address in the Controller
 		 */
-
 		DDI_PUT32(cpqary3p, &ctp->HostWrite.Upper32Addr, 0x00000000);
 		cpqary3p->heartbeat = DDI_GET32(cpqary3p, &ctp->HeartBeat);
 
@@ -632,20 +649,11 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		    (cpqary3p->host_support | 0x4));
 		cpqary3p->host_support =
 		    DDI_GET32(cpqary3p, &ctp->HostDrvrSupport);
-
-		cpqary3p->lockup_logged = CPQARY3_FALSE;
 	} else {
 	/* PERF */
 
-		/*
-		 * Check for support of PERF Transport Method
-		 */
-		if (!(DDI_GET32(cpqary3p, &ctp->TransportSupport)
-		    & CFGTBL_XPORT_PERFORMANT)) {
-			cmn_err(CE_WARN, "CPQary3 : Controller "
-			    "NOT YET INITIALIZED");
-			cmn_err(CE_CONT, "CPQary3 : For Hot Plug Operations, "
-			    "try again later \n");
+		if (cpqary3_cfgtbl_transport_has_support(cpqary3p,
+		    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
 			return (CPQARY3_FAILURE);
 		}
 
@@ -731,63 +739,19 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 
 		DDI_PUT32_CP(cpqary3p, &perf_cfg->BlockFetchCnt[0],
 		    BlockFetchCnt[0]);
-		DDI_PUT32(cpqary3p, &ctp->HostWrite.TransportRequest,
-		    CFGTBL_XPORT_PERFORMANT);
-		ddi_put32(cpqary3p->idr_handle, (uint32_t *)cpqary3p->idr,
-		    ddi_get32(cpqary3p->idr_handle, (uint32_t *)cpqary3p->idr) |
-		    CFGTBL_CHANGE_REQ);
 
 		/*
-		 * Check whether the controller is  ready
+		 * Set the Transport Method and flush the changes to the
+		 * Configuration Table.
 		 */
-
-		cntr = 0;
-		while (ddi_get32(cpqary3p->idr_handle,
-		    (uint32_t *)cpqary3p->idr) & CFGTBL_ACC_CMDS) {
-			drv_usecwait(1000000); /* Wait for 1 Sec. */
-			cntr++;
-
-
-			/*
-			 * Wait for a maximum of 90 seconds. No f/w should take
-			 * more than 90 secs to initialize. If the controller
-			 * is not ready even after 90 secs, it suggests that
-			 * something is wrong
-			 * (wrt the controller, what else) !!!
-			 */
-
-			if (cntr > CISS_INIT_TIME) /* 1.30 Mins */ {
-				cmn_err(CE_CONT, "CPQary3 : Controller "
-				    "Initialization Failed \n");
-				return (CPQARY3_FAILURE);
-			}
-		}
-
-		/*
-		 * Check whether controller accepts the requested method of
-		 * transport
-		 */
-
-		if (!(DDI_GET32(cpqary3p, &ctp->TransportActive) &
-		    CFGTBL_XPORT_PERFORMANT)) {
-			cmn_err(CE_NOTE, "CPQary3 : Failed to Initialize "
-			    "Controller");
-			cmn_err(CE_CONT, "CPQary3 : For Hot Plug Operations, "
-			    "try again later\n");
-			DTRACE_PROBE1(ctlr_init_perf_fail, CfgTable_t *, ctp);
+		cpqary3_cfgtbl_transport_set(cpqary3p,
+		    CISS_CFGTBL_XPORT_PERFORMANT);
+		if (cpqary3_cfgtbl_flush(cpqary3p) != CPQARY3_SUCCESS) {
 			return (CPQARY3_FAILURE);
 		}
 
-		DTRACE_PROBE(ctlr_init_simple);
-
-		/*
-		 * Check if Controller is ready to accept Commands
-		 */
-
-		if (!(DDI_GET32(cpqary3p, &ctp->TransportActive) &
-		    CFGTBL_ACC_CMDS)) {
-			cmn_err(CE_NOTE, "CPQary3: Controller NOT ready to "
-			    "accept Commands");
+		if (cpqary3_cfgtbl_transport_confirm(cpqary3p,
+		    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
 			return (CPQARY3_FAILURE);
 		}
 
@@ -795,7 +759,6 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		 * Check if the maximum number of oustanding commands for the
 		 * initialized controller is something greater than Zero.
 		 */
-
 		CmdsOutMax = DDI_GET32(cpqary3p, &ctp->MaxPerfModeCmdsOutMax);
 		if (CmdsOutMax == 0)
 			CmdsOutMax = DDI_GET32(cpqary3p, &ctp->CmdsOutMax);
@@ -873,7 +836,6 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		}
 		cpqary3p->host_support =
 		    DDI_GET32(cpqary3p, &ctp->HostDrvrSupport);
-		cpqary3p->lockup_logged = CPQARY3_FALSE;
 	}
 
 	return (CPQARY3_SUCCESS);
@@ -890,53 +852,25 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 uint8_t
 cpqary3_check_ctlr_init(cpqary3_t *cpqary3p)
 {
-	int8_t				retvalue;
-	uint16_t			i;
-	uint32_t			*ctlr_init;
-	ddi_acc_handle_t		ctlr_init_handle;
-	extern ddi_device_acc_attr_t	cpqary3_dev_attributes;
-
-	RETURN_FAILURE_IF_NULL(cpqary3p);
-
 	/*
-	 * Set up the mapping for a Register at offset 0xB0 from I2O Bar
-	 * The value 0xB0 taken from the CONFIGM utility.
-	 * It should read 0xffff0000 if the controller is initialized.
-	 * if not yet initialized, read it every second for 300 secs.
-	 * If not set even after 300 secs, return FAILURE.
-	 * If set, free the mapping and continue
+	 * Read from the Scratchpad Register until the expected ready
+	 * signature is detected.  This behaviour is not described in
+	 * the CISS specification.
+	 *
+	 * If the device is not ready immediate, sleep for a second and
+	 * try again.  If the device has not become ready in 300 seconds,
+	 * give up.
 	 */
-	retvalue = ddi_regs_map_setup(cpqary3p->dip, INDEX_PCI_BASE0,
-	    (caddr_t *)&ctlr_init, (offset_t)I2O_CTLR_INIT, 4,
-	    &cpqary3_dev_attributes, &ctlr_init_handle);
+	for (unsigned i = 0; i < 300; i++) {
+		uint32_t spr = ddi_get32(cpqary3p->spr0_handle,
+		    cpqary3p->spr0);
 
-	if (retvalue != DDI_SUCCESS) {
-		if (DDI_REGS_ACC_CONFLICT == retvalue)
-			cmn_err(CE_WARN,
-			    "CPQary3 : HBA Init Register Mapping Conflict");
-		cmn_err(CE_WARN,
-		    "CPQary3 : HBA Init Regsiter Mapping Failed");
-		return (CPQARY3_FAILURE);
-	}
-
-	for (i = 0; i < 300; i++) {	/* loop for 300 seconds */
-		if (CISS_CTLR_INIT == ddi_get32(ctlr_init_handle, ctlr_init)) {
-			DTRACE_PROBE(ctlr_init_check_ready);
-			ddi_regs_map_free(&ctlr_init_handle);
-			break;
-		} else {
-			DTRACE_PROBE(ctlr_init_check_notready);
-			delay(drv_usectohz(1000000));
+		if (spr == CISS_SCRATCHPAD_INITIALISED) {
+			return (CPQARY3_SUCCESS);
 		}
 	}
 
-	if (i >= 300) {	/* HBA not initialized even after 300 seconds !!! */
-		ddi_regs_map_free(&ctlr_init_handle);
-		cmn_err(CE_WARN, "CPQary3 : %s NOT initialized !!! HBA may not "
-		    "function properly. Please replace the hardware or check "
-		    "the connections", cpqary3p->hba_name);
-		return (CPQARY3_FAILURE);
-	}
-
-	return (CPQARY3_SUCCESS);
+	dev_err(cpqary3p->dip, CE_WARN, "time out waiting for controller "
+	    "to become ready");
+	return (CPQARY3_FAILURE);
 }

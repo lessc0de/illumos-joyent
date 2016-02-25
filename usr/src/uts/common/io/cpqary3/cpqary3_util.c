@@ -83,6 +83,11 @@ cpqary3_read_conf_file(dev_info_t *dip, cpqary3_t *cpqary3p)
 	}
 }
 
+void
+cpqary3_lockup_check(cpqary3_t *cpq)
+{
+}
+
 /*
  * Function	: 	cpqary3_tick_hdlr
  * Description	: 	This routine is called once in 60 seconds to detect any

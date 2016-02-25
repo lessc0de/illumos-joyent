@@ -467,7 +467,7 @@ int32_t cpqary3_ioctl_bmic_pass(uintptr_t, cpqary3_t *, int);
 int32_t cpqary3_ioctl_scsi_pass(uintptr_t, cpqary3_t *, int);
 uint8_t cpqary3_probe4targets(cpqary3_t *);
 void cpqary3_cmdlist_release(cpqary3_cmdpvt_t *, uint8_t);
-int32_t cpqary3_submit(cpqary3_t *, uint32_t);
+int cpqary3_submit(cpqary3_t *, uint32_t);
 void cpqary3_free_phyctgs_mem(cpqary3_phyctg_t *, uint8_t);
 caddr_t cpqary3_alloc_phyctgs_mem(cpqary3_t *, size_t, uint32_t *,
     cpqary3_phyctg_t *);

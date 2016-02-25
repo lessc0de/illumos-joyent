@@ -68,33 +68,56 @@ extern "C" {
 #define	CFG_MEM1BAR		0x14
 
 /* I2O Space Register Offsets */
-#define	I2O_IBDB_SET		0x20
-#define	I2O_IBDB_CLEAR		0x70
+#define	I2O_INBOUND_DOORBELL	0x20
 #define	I2O_INT_STATUS		0x30
 #define	I2O_INT_MASK		0x34
 #define	I2O_IBPOST_Q		0x40
 #define	I2O_OBPOST_Q		0x44
 #define	I2O_OBDB_STATUS		0x9C
 #define	I2O_OBDB_CLEAR		0xA0
-#define	I2O_CTLR_INIT		0xB0	/* not available in CISS specs */
+#define	I2O_SCRATCHPAD		0xB0
 
-/* Configuration Table */
-#define	CFGTBL_CHANGE_REQ	0x00000001l
-#define	CFGTBL_ACC_CMDS		0x00000001l
+/*
+ * The Scratchpad Register (I2O_SCRATCHPAD) is not mentioned in the CISS
+ * specification.  It serves at least two known functions:
+ *	- Signalling controller readiness
+ *	- Exposing a debugging code when the controller firmware locks up
+ */
+#define	CISS_SCRATCHPAD_INITIALISED		0xffff0000
 
-/* Transport Method */
-#define	CFGTBL_XPORT_SIMPLE		0x00000002l
-#define	CFGTBL_XPORT_PERFORMANT		0x00000004l
-#define	CFGTBL_XPORT_MEMQ		0x00000008l
+/*
+ * Outbound Doorbell Register Values.
+ *
+ * These are read from the Outbound Doorbell Set/Status Register
+ * (I2O_OBDB_STATUS), but cleared by writing to the Clear
+ * Register (I2O_OBDB_CLEAR).
+ */
+#define	CISS_ODR_BIT_INTERRUPT			(1UL << 0)
+#define	CISS_ODR_BIT_LOCKUP			(1UL << 1)
 
-#define	CPQARY3_SIMPLE		CFGTBL_XPORT_SIMPLE
-#define	CPQARY3_PERFORMANT	CFGTBL_XPORT_PERFORMANT
+/*
+ * Inbound Doorbell Register Values.
+ *
+ * These are written to and read from the Inbound Doorbell Register
+ * (I2O_INBOUND_DOORBELL).
+ */
+#define	CISS_IDR_BIT_CFGTBL_CHANGE		(1UL << 0)
 
-/* not being used currently */
-#define	CFGTBL_BusType_Ultra2	0x00000001l
-#define	CFGTBL_BusType_Ultra3	0x00000002l
-#define	CFGTBL_BusType_Fibre1G	0x00000100l
-#define	CFGTBL_BusType_Fibre2G	0x00000200l
+/*
+ * Transport Methods.
+ *
+ * These bit positions are used in the Configuration Table to detect controller
+ * support for a particular method, via "TransportSupport"; to request that the
+ * controller enable a particular method, via "HostWrite.TransportRequest"; and
+ * to detect whether the controller has acknowledged the request and enabled
+ * the desired method, via "TransportActive".
+ *
+ * See: "9.1 Configuration Table" in the CISS Specification.
+ */
+#define	CISS_CFGTBL_READY_FOR_COMMANDS		(1UL << 0)
+#define	CISS_CFGTBL_XPORT_SIMPLE		(1UL << 1)
+#define	CISS_CFGTBL_XPORT_PERFORMANT		(1UL << 2)
+#define	CISS_CFGTBL_XPORT_MEMQ			(1UL << 4)
 
 /* for hard reset of the controller */
 #define	CISS_POWER_OFF		0x03	/* Self Defined */

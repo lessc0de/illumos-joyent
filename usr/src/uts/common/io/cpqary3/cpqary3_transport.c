@@ -628,31 +628,25 @@ cpqary3_transport(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 	memp->complete = cpqary3_oscmd_complete;
 	/* PERF */
 
-	switch (cpqary3_build_cmdlist(memp, SA2TGT(sa))) {
-	case CPQARY3_SUCCESS :
+	if (cpqary3_build_cmdlist(memp, SA2TGT(sa)) == CPQARY3_SUCCESS) {
 		if (scsi_pktp->pkt_flags & FLAG_NOINTR) {
 			return (cpqary3_handle_flag_nointr(memp, scsi_pktp));
 		}
 		cpqary3_pktp->cmd_start_time = ddi_get_lbolt();
+
 		mutex_enter(&ctlr->hw_mutex);
-		/* CONTROLLER_LOCKUP */
-		if (EIO == cpqary3_submit(ctlr, memp->cmdlist_phyaddr)) {
+		if (cpqary3_submit(ctlr, memp->cmdlist_phyaddr) != 0) {
 			mutex_exit(&ctlr->hw_mutex);
 			cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);
 			return (TRAN_FATAL_ERROR);
 		}
-		/* CONTROLLER_LOCKUP */
 		mutex_exit(&ctlr->hw_mutex);
-		break;
-	case CPQARY3_FAILURE :
-		cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);
-		return (TRAN_FATAL_ERROR);
-	default: /* Never occurs */
-		cmn_err(CE_NOTE, "CPQary3 : Transport : Unexpected Error");
-		return (TRAN_FATAL_ERROR);
+
+		return (TRAN_ACCEPT);
 	}
 
-	return (TRAN_ACCEPT);
+	cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);
+	return (TRAN_FATAL_ERROR);
 }
 
 /*

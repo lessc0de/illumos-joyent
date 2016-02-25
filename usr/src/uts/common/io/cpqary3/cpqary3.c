@@ -879,7 +879,7 @@ cpqary3_update_ctlrdetails(cpqary3_t *cpqary3p, uint32_t *cleanstatus)
 	 */
 	retvalue = ddi_regs_map_setup(cpqary3p->dip,
 	    mem_bar0, /* INDEX_PCI_BASE0, */
-	    (caddr_t *)&cpqary3p->idr, (offset_t)I2O_IBDB_SET, map_len,
+	    (caddr_t *)&cpqary3p->idr, (offset_t)I2O_INBOUND_DOORBELL, map_len,
 	    &cpqary3_dev_attributes, &cpqary3p->idr_handle);
 
 	if (retvalue != DDI_SUCCESS) {
@@ -926,7 +926,7 @@ cpqary3_update_ctlrdetails(cpqary3_t *cpqary3p, uint32_t *cleanstatus)
 	/* LOCKUP CODE */
 	retvalue = ddi_regs_map_setup(cpqary3p->dip,
 	    mem_bar0, /* INDEX_PCI_BASE0, */
-	    (caddr_t *)&cpqary3p->spr0, (offset_t)I2O_CTLR_INIT, map_len,
+	    (caddr_t *)&cpqary3p->spr0, (offset_t)I2O_SCRATCHPAD, map_len,
 	    &cpqary3_dev_attributes, &cpqary3p->spr0_handle);
 
 	if (retvalue != DDI_SUCCESS) {

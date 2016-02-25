@@ -33,17 +33,28 @@
 uint_t
 cpqary3_hw_isr(caddr_t per_ctlr)
 {
-	uint8_t			need_swintr;
-	cpqary3_t		*cpqary3p;
+	boolean_t		need_swintr;
+	cpqary3_t		*cpqary3p = (cpqary3_t *)per_ctlr;
 	cpqary3_drvr_replyq_t	*replyq_ptr;
-	volatile CfgTable_t	*ctp;
+	volatile CfgTable_t	*ctp = cpqary3p->ct;
 	uint32_t		spr0;
 	uint32_t		doorbell_status;
 	uint32_t		tag;
 
-	cpqary3p = (void *)per_ctlr;
-	ctp = (CfgTable_t *)cpqary3p->ct;
 	replyq_ptr = (cpqary3_drvr_replyq_t *)cpqary3p->drvr_replyq;
+
+
+	/*
+	 * Check the Interrupt Status Register to see if the Outbound
+	 * Post List FIFO is not empty.
+	 */
+	if (cpqary3p->check_ctlr_intr(cpqary3p) != CPQARY3_SUCCESS) {
+		/*
+		 * The Outbound Post List FIFO is not empty, so we must
+		 * service this interrupt.
+		 */
+		goto service;
+	}
 
 	if (CPQARY3_FAILURE == cpqary3p->check_ctlr_intr(cpqary3p)) {
 		if (cpqary3p->heartbeat ==
@@ -72,6 +83,8 @@ cpqary3_hw_isr(caddr_t per_ctlr)
 		}
 		return (DDI_INTR_UNCLAIMED);
 	}
+
+service:
 
 	/* PERF */
 
@@ -133,16 +146,17 @@ cpqary3_hw_isr(caddr_t per_ctlr)
 	mutex_enter(&cpqary3p->hw_mutex);
 
 	if (cpqary3p->swintr_flag == CPQARY3_TRUE) {
-		need_swintr = CPQARY3_FALSE;
+		need_swintr = B_FALSE;
 	} else {
-		need_swintr = CPQARY3_TRUE;
+		need_swintr = B_TRUE;
 		cpqary3p->swintr_flag = CPQARY3_TRUE;
 	}
 
 	mutex_exit(&cpqary3p->hw_mutex);
 
-	if (CPQARY3_TRUE == need_swintr)
+	if (need_swintr) {
 		ddi_trigger_softintr(cpqary3p->cpqary3_softintr_id);
+	}
 
 	return (DDI_INTR_CLAIMED);
 }
