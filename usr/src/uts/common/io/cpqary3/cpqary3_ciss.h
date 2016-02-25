@@ -11,6 +11,7 @@
 
 /*
  * Copyright (C) 2013 Hewlett-Packard Development Company, L.P.
+ * Copyright 2016 Joyent, Inc.
  */
 
 #ifndef	_CPQARY3_CISS_H
