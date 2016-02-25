@@ -412,11 +412,6 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	}
 
 
-	/* Register a timeout driver-routine to be called every 2 secs */
-	cpqary3p->tick_tmout_id = timeout(cpqary3_tick_hdlr,
-	    (caddr_t)cpqary3p, drv_usectohz(CPQARY3_TICKTMOUT_VALUE));
-	cleanstatus |= CPQARY3_TICK_TMOUT_REGD;
-
 	/* Register Software Interrupt Handler */
 	if (ddi_add_softintr(dip,  DDI_SOFTINT_HIGH,
 	    &cpqary3p->cpqary3_softintr_id, &cpqary3p->sw_iblock_cookie, NULL,
@@ -438,6 +433,13 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	cpqary3_intr_onoff(cpqary3p, CPQARY3_INTR_ENABLE);
 	if (cpqary3p->host_support & 0x4)
 		cpqary3_lockup_intr_onoff(cpqary3p, CPQARY3_LOCKUP_INTR_ENABLE);
+
+	/*
+	 * Register a periodic function to be called every 15 seconds.
+	 */
+	cpqary3p->cpq_periodic = ddi_periodic_add(cpqary3_periodic, cpqary3p,
+	    15 * NANOSEC, DDI_IPL_0);
+	cleanstatus |= CPQARY3_TICK_TMOUT_REGD;
 
 	/*
 	 * We have come with hmaeventd - which logs the storage events on
@@ -661,16 +663,15 @@ cpqary3_cleanup(cpqary3_t *cpqary3p, uint32_t status)
 	 * any register/memory mapping
 	 */
 
+	if ((status & CPQARY3_TICK_TMOUT_REGD) && cpqary3p->cpq_periodic) {
+		ddi_periodic_delete(cpqary3p->cpq_periodic);
+	}
+
 	if (status & CPQARY3_INTR_HDLR_SET)
 		ddi_remove_intr(cpqary3p->dip, 0, cpqary3p->hw_iblock_cookie);
 
 	if (status & CPQARY3_SW_INTR_HDLR_SET)
 		ddi_remove_softintr(cpqary3p->cpqary3_softintr_id);
-
-	if ((status & CPQARY3_TICK_TMOUT_REGD) && cpqary3p->tick_tmout_id) {
-		VERIFY(untimeout(cpqary3p->tick_tmout_id) >= 0);
-		cpqary3p->tick_tmout_id = NULL;
-	}
 
 	if (status & CPQARY3_CREATE_MINOR_NODE) {
 		(void) sprintf(node_name, "cpqary3%d", cpqary3p->instance);

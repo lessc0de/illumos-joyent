@@ -86,111 +86,112 @@ cpqary3_read_conf_file(dev_info_t *dip, cpqary3_t *cpqary3p)
 void
 cpqary3_lockup_check(cpqary3_t *cpq)
 {
+	/*
+	 * Read the current controller heartbeat value.
+	 */
+	uint32_t heartbeat = ddi_get32(cpq->ct_handle, &cpq->ct->HeartBeat);
+
+	/*
+	 * Check to see if the value is the same as last time we looked:
+	 */
+	if (heartbeat != cpq->cpq_last_heartbeat) {
+		/*
+		 * The heartbeat value has changed, which suggests that the
+		 * firmware in the controller has not yet come to a complete
+		 * stop.  Record the new value, as well as the current time.
+		 */
+		cpq->cpq_last_heartbeat = heartbeat;
+		cpq->cpq_last_heartbeat_lbolt = ddi_get_lbolt();
+		return;
+	}
+
+	/*
+	 * The controller _might_ have been able to signal to us that is
+	 * has locked up.  This is a truly unfathomable state of affairs:
+	 * If the firmware can tell it has flown off the rails, why not
+	 * simply reset the controller?
+	 */
+	uint32_t odr = ddi_get32(cpq->odr_handle, cpq->odr);
+	uint32_t spr = ddi_get32(cpq->spr0_handle, cpq->spr0);
+	if ((odr & CISS_ODR_BIT_LOCKUP) != 0) {
+		dev_err(cpq->dip, CE_PANIC, "HP SmartArray firmware has "
+		    "reported a critical fault (odr %08x spr %08x)",
+		    odr, spr);
+	}
+
+	clock_t expiry = cpq->cpq_last_heartbeat_lbolt + CPQARY3_SEC2HZ(60);
+	if (ddi_get_lbolt() >= expiry) {
+		dev_err(cpq->dip, CE_PANIC, "HP SmartArray firmware has "
+		    "stopped responding (odr %08x spr %08x)",
+		    odr, spr);
+	}
 }
 
 /*
- * Function	: 	cpqary3_tick_hdlr
- * Description	: 	This routine is called once in 60 seconds to detect any
+ * Function	: 	cpqary3_periodic
+ * Description	: 	This routine is called once in 15 seconds to detect any
  *			command that is pending with the controller and has
  *			timed out.
- *			Once invoked, it re-initializes itself such that it is
- *			invoked after an interval of 60 seconds.
  * Called By	: 	kernel
  * Parameters	: 	per_controller
  * Calls	: 	None
  * Return Values: 	None
  */
 void
-cpqary3_tick_hdlr(void *arg)
+cpqary3_periodic(void *arg)
 {
-	clock_t			cpqary3_lbolt;
-	clock_t			cpqary3_ticks;
-	cpqary3_t		*ctlr;
-	cpqary3_pkt_t		*pktp;
-	struct scsi_pkt		*scsi_pktp;
-	cpqary3_cmdpvt_t	*local;
-	volatile CfgTable_t	*ctp;
-	uint32_t		i;
-	uint32_t		no_cmds = 0;
+	cpqary3_t *cpq = arg;
+	uint32_t no_cmds;
 
-	/*
-	 * The per-controller shall be passed as argument.
-	 * Read the HeartBeat of the controller.
-	 * if the current heartbeat is the same as the one recorded earlier,
-	 * the f/w has locked up!!!
-	 */
+	cpqary3_lockup_check(cpq);
 
-	if (NULL == (ctlr = (cpqary3_t *)arg))
-		return;
+	mutex_enter(&cpq->sw_mutex);
+	no_cmds = (uint32_t)((cpq->ctlr_maxcmds / 3) * NO_OF_CMDLIST_IN_A_BLK);
+	for (uint32_t i = 0; i < no_cmds; i++) {
+		cpqary3_cmdpvt_t *local = &cpq->cmdmemlistp->pool[i];
+		cpqary3_pkt_t *pktp;
+		struct scsi_pkt *scsi_pktp;
+		clock_t cpqary3_lbolt;
 
-	ctp = (CfgTable_t *)ctlr->ct;
-
-	/* CONTROLLER_LOCKUP */
-	if (ctlr->heartbeat == DDI_GET32(ctlr, &ctp->HeartBeat)) {
-		if (ctlr->lockup_logged == CPQARY3_FALSE) {
-			cmn_err(CE_WARN, "CPQary3 : "
-			    "%s HBA firmware Locked !!!", ctlr->hba_name);
-			cmn_err(CE_WARN, "CPQary3 : "
-			    "Please reboot the system");
-			cpqary3_intr_onoff(ctlr, CPQARY3_INTR_DISABLE);
-			if (ctlr->host_support & 0x4)
-				cpqary3_lockup_intr_onoff(ctlr,
-				    CPQARY3_LOCKUP_INTR_DISABLE);
-			ctlr->controller_lockup = CPQARY3_TRUE;
-			ctlr->lockup_logged = CPQARY3_TRUE;
-		}
-	}
-	/* CONTROLLER_LOCKUP */
-	no_cmds  = (uint32_t)((ctlr->ctlr_maxcmds / 3) *
-	    NO_OF_CMDLIST_IN_A_BLK);
-	mutex_enter(&ctlr->sw_mutex);
-
-	for (i = 0; i < no_cmds; i++) {
-		local = &ctlr->cmdmemlistp->pool[i];
 		ASSERT(local != NULL);
-		pktp = MEM2PVTPKT(local);
-
-		if (!pktp)
+		if ((pktp = MEM2PVTPKT(local)) == NULL) {
 			continue;
+		}
 
 		if ((local->cmdpvt_flag == CPQARY3_TIMEOUT) ||
 		    (local->cmdpvt_flag == CPQARY3_RESET)) {
 			continue;
 		}
 
-		if (local->occupied == CPQARY3_OCCUPIED) {
-			scsi_pktp = pktp->scsi_cmd_pkt;
-			cpqary3_lbolt = ddi_get_lbolt();
-			if ((scsi_pktp) && (scsi_pktp->pkt_time)) {
-				cpqary3_ticks = cpqary3_lbolt -
-				    pktp->cmd_start_time;
+		if (local->occupied != CPQARY3_OCCUPIED) {
+			continue;
+		}
 
-				if ((drv_hztousec(cpqary3_ticks)/1000000) >
-				    scsi_pktp->pkt_time) {
-					scsi_pktp->pkt_reason = CMD_TIMEOUT;
-					scsi_pktp->pkt_statistics =
-					    STAT_TIMEOUT;
-					scsi_pktp->pkt_state = STATE_GOT_BUS |
-					    STATE_GOT_TARGET | STATE_SENT_CMD;
-					local->cmdpvt_flag = CPQARY3_TIMEOUT;
+		scsi_pktp = pktp->scsi_cmd_pkt;
+		cpqary3_lbolt = ddi_get_lbolt();
+		if ((scsi_pktp) && (scsi_pktp->pkt_time)) {
+			clock_t cpqary3_ticks = cpqary3_lbolt -
+			    pktp->cmd_start_time;
 
-					/* This should always be the case */
-					if (scsi_pktp->pkt_comp) {
-						mutex_exit(&ctlr->sw_mutex);
-						(*scsi_pktp->pkt_comp)
-						    (scsi_pktp);
-						mutex_enter(&ctlr->sw_mutex);
-						continue;
-					}
+			if ((drv_hztousec(cpqary3_ticks) / 1000000) >
+			    scsi_pktp->pkt_time) {
+				scsi_pktp->pkt_reason = CMD_TIMEOUT;
+				scsi_pktp->pkt_statistics = STAT_TIMEOUT;
+				scsi_pktp->pkt_state = STATE_GOT_BUS |
+				    STATE_GOT_TARGET | STATE_SENT_CMD;
+				local->cmdpvt_flag = CPQARY3_TIMEOUT;
+
+				/* This should always be the case */
+				if (scsi_pktp->pkt_comp != NULL) {
+					mutex_exit(&cpq->sw_mutex);
+					(*scsi_pktp->pkt_comp)(scsi_pktp);
+					mutex_enter(&cpq->sw_mutex);
+					continue;
 				}
 			}
 		}
 	}
-
-	ctlr->heartbeat = DDI_GET32(ctlr, &ctp->HeartBeat);
-	mutex_exit(&ctlr->sw_mutex);
-	ctlr->tick_tmout_id = timeout(cpqary3_tick_hdlr,
-	    (caddr_t)ctlr, drv_usectohz(CPQARY3_TICKTMOUT_VALUE));
+	mutex_exit(&cpq->sw_mutex);
 }
 
 /*

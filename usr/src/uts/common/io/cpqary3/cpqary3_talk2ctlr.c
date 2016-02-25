@@ -638,7 +638,6 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		 * Zero the Upper 32 Address in the Controller
 		 */
 		DDI_PUT32(cpqary3p, &ctp->HostWrite.Upper32Addr, 0x00000000);
-		cpqary3p->heartbeat = DDI_GET32(cpqary3p, &ctp->HeartBeat);
 
 		/* Set the controller interrupt check routine */
 		cpqary3p->check_ctlr_intr = cpqary3_check_simple_ctlr_intr;
@@ -815,7 +814,6 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		 */
 
 		DDI_PUT32(cpqary3p, &ctp->HostWrite.Upper32Addr, 0x00000000);
-		cpqary3p->heartbeat = DDI_GET32(cpqary3p, &ctp->HeartBeat);
 
 		/* Set the controller interrupt check routine */
 
@@ -837,6 +835,14 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		cpqary3p->host_support =
 		    DDI_GET32(cpqary3p, &ctp->HostDrvrSupport);
 	}
+
+	/*
+	 * Read initial controller heartbeat value and mark the current
+	 * reading time.
+	 */
+	cpqary3p->cpq_last_heartbeat = ddi_get32(cpqary3p->ct_handle,
+	    &ctp->HeartBeat);
+	cpqary3p->cpq_last_heartbeat_lbolt = ddi_get_lbolt();
 
 	return (CPQARY3_SUCCESS);
 }

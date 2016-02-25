@@ -84,8 +84,6 @@ extern "C" {
 
 #define	CPQARY3_CLEAN_ALL		0x0FFF
 
-#define	CPQARY3_TICKTMOUT_VALUE		180000000    /* 180 seconds */
-
 /*
  * Defines for Maximum and Default Settings.
  */
@@ -155,6 +153,7 @@ extern "C" {
 #define	RETURN_VOID_IF_NULL(x)  	if (NULL == x) return
 #define	RETURN_NULL_IF_NULL(x)  	if (NULL == x) return (NULL)
 #define	RETURN_FAILURE_IF_NULL(x)	if (NULL == x) return (CPQARY3_FAILURE)
+#define	CPQARY3_SEC2HZ(x)		drv_usectohz((x) * 1000000)
 
 /*
  * Macros for memory allocation/deallocations
@@ -283,9 +282,11 @@ typedef struct cpqary3_per_controller {
 	/* Controller Specific Information */
 	int8_t			hba_name[38];
 	ulong_t			num_of_targets;
-	uint32_t		heartbeat;
 	uint32_t		board_id;
 	cpqary3_bd_t		*bddef;
+
+	uint32_t		cpq_last_heartbeat;
+	clock_t			cpq_last_heartbeat_lbolt;
 
 	/* Condition Variables used */
 	kcondvar_t		cv_immediate_wait;
@@ -309,7 +310,7 @@ typedef struct cpqary3_per_controller {
 	kmutex_t		sw_mutex;	/* s/w mutex */
 	ddi_softintr_t		cpqary3_softintr_id; /* s/w intr identifier */
 	uint8_t			swintr_flag;
-	timeout_id_t		tick_tmout_id;	/* timeout identifier */
+	ddi_periodic_t		cpq_periodic;
 	uint8_t			cpqary3_tick_hdlr;
 	scsi_hba_tran_t		*hba_tran;	/* transport structure */
 	cpqary3_cmdmemlist_t	*cmdmemlistp;	/* database - Memory Pool */
@@ -452,7 +453,7 @@ typedef struct cpqary3_ioctlreq {
 
 void cpqary3_init_hbatran(cpqary3_t *);
 void cpqary3_read_conf_file(dev_info_t *, cpqary3_t *);
-void cpqary3_tick_hdlr(void *);
+void cpqary3_periodic(void *);
 void cpqary3_flush_cache(cpqary3_t *);
 void cpqary3_intr_onoff(cpqary3_t *, uint8_t);
 void cpqary3_lockup_intr_onoff(cpqary3_t *, uint8_t);
@@ -487,6 +488,7 @@ void cpqary3_synccmd_free(cpqary3_t *, cpqary3_cmdpvt_t *);
 int cpqary3_synccmd_send(cpqary3_t *, cpqary3_cmdpvt_t *, clock_t, int);
 uint8_t cpqary3_poll_retrieve(cpqary3_t *cpqary3p, uint32_t poll_tag);
 uint8_t cpqary3_build_cmdlist(cpqary3_cmdpvt_t *cpqary3_cmdpvtp, uint32_t tid);
+void cpqary3_lockup_check(cpqary3_t *);
 
 #ifdef	__cplusplus
 }

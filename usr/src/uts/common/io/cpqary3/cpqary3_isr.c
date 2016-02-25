@@ -50,43 +50,13 @@ cpqary3_hw_isr(caddr_t per_ctlr)
 	 */
 	if (cpqary3p->check_ctlr_intr(cpqary3p) != CPQARY3_SUCCESS) {
 		/*
-		 * The Outbound Post List FIFO is not empty, so we must
-		 * service this interrupt.
+		 * Check to see if the firmware has come to rest.  If it has,
+		 * this routine will panic the system.
 		 */
-		goto service;
-	}
+		cpqary3_lockup_check(cpqary3p);
 
-	if (CPQARY3_FAILURE == cpqary3p->check_ctlr_intr(cpqary3p)) {
-		if (cpqary3p->heartbeat ==
-		    DDI_GET32(cpqary3p, &ctp->HeartBeat)) {
-			if (0x2 & ddi_get32(cpqary3p->odr_handle,
-			    (uint32_t *)cpqary3p->odr)) {
-				spr0 = ddi_get32(cpqary3p->spr0_handle,
-				    (uint32_t *)cpqary3p->spr0);
-				spr0 = spr0 >> 16;
-				cmn_err(CE_WARN, "CPQary3 : %s HBA firmware "
-				    "Locked !!!  Lockup Code: 0x%x",
-				    cpqary3p->hba_name, spr0);
-				cmn_err(CE_WARN, "CPQary3 : Please reboot "
-				    "the system");
-				ddi_put32(cpqary3p->odr_cl_handle,
-				    (uint32_t *)cpqary3p->odr_cl, 0x2);
-				cpqary3_intr_onoff(cpqary3p,
-				    CPQARY3_INTR_DISABLE);
-				if (cpqary3p->host_support & 0x4) {
-					cpqary3_lockup_intr_onoff(cpqary3p,
-					    CPQARY3_LOCKUP_INTR_DISABLE);
-				}
-				cpqary3p->controller_lockup = CPQARY3_TRUE;
-			}
-			return (DDI_INTR_CLAIMED);
-		}
 		return (DDI_INTR_UNCLAIMED);
 	}
-
-service:
-
-	/* PERF */
 
 	/*
 	 * We decided that we will have only one retrieve function for
