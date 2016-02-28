@@ -86,6 +86,23 @@ extern "C" {
 #define	CPQARY3_CLEAN_ALL		0x0FFF
 
 /*
+ * Definitions to support waiting for the controller to converge on a
+ * particular state; ready or not ready.  These are used with
+ * cpqary3_ctlr_wait_for_state().
+ */
+#define	CPQARY3_WAIT_DELAY_SECONDS	120
+typedef enum cpqary3_wait_state {
+	CPQARY3_WAIT_STATE_READY = 1,
+	CPQARY3_WAIT_STATE_UNREADY
+} cpqary3_wait_state_t;
+
+typedef enum cpqary3_ctlr_mode {
+	CPQARY3_CTLR_MODE_UNKNOWN = 0,
+	CPQARY3_CTLR_MODE_SIMPLE,
+	CPQARY3_CTLR_MODE_PERFORMANT
+} cpqary3_ctlr_mode_t;
+
+/*
  * Defines for Maximum and Default Settings.
  */
 
@@ -155,12 +172,6 @@ extern "C" {
 #define	RETURN_NULL_IF_NULL(x)  	if (NULL == x) return (NULL)
 #define	RETURN_FAILURE_IF_NULL(x)	if (NULL == x) return (CPQARY3_FAILURE)
 #define	CPQARY3_SEC2HZ(x)		drv_usectohz((x) * 1000000)
-
-/*
- * Macros for memory allocation/deallocations
- */
-#define	MEM_ZALLOC(x)		kmem_zalloc(x, KM_NOSLEEP)
-#define	MEM_SFREE(x, y)		if (x) kmem_free((void*)x, y)
 
 /*
  * Convenient macros for reading/writing Configuration table registers
@@ -268,11 +279,20 @@ typedef struct cpqary3_target {
 #define	INTR_SIMPLE_5I_MASK		0x00000004l
 #define	INTR_SIMPLE_5I_LOCKUP_MASK	0x0000000cl
 
-typedef struct cpqary3_per_controller CTLR;
+typedef struct cpqary3_replyq {
+	unsigned cprq_cycle_indicator;
+	size_t cprq_ntags;
+	uint32_t *cprq_tags;
+	size_t cprq_read_index;
+	uint32_t cprq_tags_pa; /* XXX wrong type */
+	cpqary3_phyctg_t cprq_phyctg;
+} cpqary3_replyq_t;
+
+typedef struct cpqary3 cpqary3_t;
 /*
  * Per Controller Structure
  */
-typedef struct cpqary3_per_controller {
+struct cpqary3 {
 	/* System Dependent Entities */
 	uint8_t			bus;
 	uint8_t			dev : 5;
@@ -281,13 +301,24 @@ typedef struct cpqary3_per_controller {
 	dev_info_t		*dip;
 
 	/* Controller Specific Information */
+	cpqary3_ctlr_mode_t	cpq_ctlr_mode;
 	int8_t			hba_name[38];
 	ulong_t			num_of_targets;
 	uint32_t		board_id;
 	cpqary3_bd_t		*bddef;
 
+	/*
+	 * Controller Heartbeat Tracking
+	 */
 	uint32_t		cpq_last_heartbeat;
 	clock_t			cpq_last_heartbeat_lbolt;
+
+	uint32_t		cpq_next_tag;
+
+	boolean_t		cpq_intr_off;
+
+	cpqary3_replyq_t	cpq_replyq;
+	avl_tree_t		cpq_inflight;
 
 	/* Condition Variables used */
 	kcondvar_t		cv_immediate_wait;
@@ -310,16 +341,15 @@ typedef struct cpqary3_per_controller {
 	ddi_iblock_cookie_t	sw_iblock_cookie; /* cookie for s/w intr */
 	kmutex_t		sw_mutex;	/* s/w mutex */
 	ddi_softintr_t		cpqary3_softintr_id; /* s/w intr identifier */
-	uint8_t			swintr_flag;
+	boolean_t		cpq_swintr_flag;
 	ddi_periodic_t		cpq_periodic;
 	uint8_t			cpqary3_tick_hdlr;
 	scsi_hba_tran_t		*hba_tran;	/* transport structure */
 	cpqary3_cmdmemlist_t	*cmdmemlistp;	/* database - Memory Pool */
 	cpqary3_tgt_t		*cpqary3_tgtp[CPQARY3_MAX_TGT];
-	cpqary3_drvr_replyq_t	*drvr_replyq;
 
 
-	uint8_t			(*check_ctlr_intr)(CTLR *);
+	uint8_t			(*check_ctlr_intr)(cpqary3_t *);
 
 	/*
 	 * PCI Configuration Registers
@@ -370,7 +400,6 @@ typedef struct cpqary3_per_controller {
 	CfgTrans_Perf_t		*cp;
 	ddi_acc_handle_t	cp_handle;
 
-	uint32_t		legacy_mapping;
 	uint32_t		noe_support;
 	/* SG */
 	uint32_t		sg_cnt;
@@ -380,17 +409,66 @@ typedef struct cpqary3_per_controller {
 	uint8_t			controller_lockup;
 	uint8_t			lockup_logged;
 	uint32_t		poll_flag;
-} cpqary3_t;
 
+	list_t			cpq_commands;	/* List of all commands. */
+};
 
-/*
- * Private Structure for Self Issued Commands
- */
+typedef struct cpqary3_command cpqary3_command_t;
+typedef struct cpqary3_command_internal cpqary3_command_internal_t;
+typedef struct cpqary3_pkt cpqary3_pkt_t;
 
-typedef struct cpqary3_driver_private {
-	void				*sg;
-	cpqary3_phyctg_t	*phyctgp;
-}cpqary3_private_t;
+typedef enum cpqary3_synccmd_status {
+	CPQARY3_SYNCCMD_STATUS_NONE = 0,
+	CPQARY3_SYNCCMD_STATUS_SUBMITTED,
+	CPQARY3_SYNCCMD_STATUS_TIMEOUT
+} cpqary3_synccmd_status_t;
+
+typedef enum cpqary3_command_type {
+	CPQARY3_CMDTYPE_NONE = 0,
+	CPQARY3_CMDTYPE_OS,
+	CPQARY3_CMDTYPE_SYNCCMD,
+} cpqary3_command_type_t;
+
+struct cpqary3_command {
+	uint32_t cpcm_tag;
+	cpqary3_command_type_t cpcm_type;
+
+	cpqary3_t *cpcm_ctlr;
+
+	list_node_t cpcm_link;		/* Linkage for allocated list. */
+	avl_node_t cpcm_node;		/* Inflight AVL membership. */
+	boolean_t cpcm_inflight;
+	boolean_t cpcm_error;
+	boolean_t cpcm_free_on_complete;
+	boolean_t cpcm_used;
+
+	cpqary3_synccmd_status_t cpcm_synccmd_status;
+
+	cpqary3_pkt_t *cpcm_private;
+	cpqary3_command_internal_t *cpcm_internal;
+
+	void (*cpcm_complete)(cpqary3_command_t *);
+
+	/*
+	 * Physical allocation tracking:
+	 */
+	cpqary3_phyctg_t cpcm_phyctg;
+
+	CommandList_t *cpcm_va_cmd;
+	uint32_t cpcm_pa_cmd; /* XXX wrong type */
+
+	ErrorInfo_t *cpcm_va_err;
+	uint32_t cpcm_pa_err; /* XXX wrong type */
+};
+
+struct cpqary3_command_internal {
+	cpqary3_phyctg_t cpcmi_phyctg;
+
+	void *cpcmi_va;
+	uint32_t cpcmi_pa; /* XXX wrong type */
+	size_t cpcmi_len;
+};
+
 
 /* cmd_flags */
 #define	CFLAG_DMASEND	0x01
@@ -400,7 +478,7 @@ typedef struct cpqary3_driver_private {
 /*
  * Driver Private Packet
  */
-typedef struct cpqary3_pkt {
+struct cpqary3_pkt {
 	struct scsi_pkt		*scsi_cmd_pkt;
 	ddi_dma_win_t		prev_winp;
 	ddi_dma_seg_t		prev_segp;
@@ -422,8 +500,8 @@ typedef struct cpqary3_pkt {
 	uint32_t		cmd_flags;
 	uint32_t		cdb_len;
 	uint32_t		scb_len;
-	cpqary3_cmdpvt_t	*memp;
-} cpqary3_pkt_t;
+	cpqary3_command_t	*cmd_command;
+};
 
 #pragma pack(1)
 
@@ -455,41 +533,72 @@ typedef struct cpqary3_ioctlreq {
 void cpqary3_init_hbatran(cpqary3_t *);
 void cpqary3_read_conf_file(dev_info_t *, cpqary3_t *);
 void cpqary3_periodic(void *);
-void cpqary3_flush_cache(cpqary3_t *);
+int cpqary3_flush_cache(cpqary3_t *);
 void cpqary3_intr_onoff(cpqary3_t *, uint8_t);
 void cpqary3_lockup_intr_onoff(cpqary3_t *, uint8_t);
 uint8_t cpqary3_disable_NOE_command(cpqary3_t *);
 uint8_t cpqary3_send_NOE_command(cpqary3_t *, cpqary3_cmdpvt_t *, uint8_t);
 uint16_t cpqary3_init_ctlr_resource(cpqary3_t *);
-uint32_t cpqary3_hw_isr(caddr_t);
-uint32_t cpqary3_sw_isr(caddr_t);
 int32_t cpqary3_ioctl_driver_info(uintptr_t, int);
 int32_t cpqary3_ioctl_ctlr_info(uintptr_t, cpqary3_t *, int);
 int32_t cpqary3_ioctl_bmic_pass(uintptr_t, cpqary3_t *, int);
 int32_t cpqary3_ioctl_scsi_pass(uintptr_t, cpqary3_t *, int);
 uint8_t cpqary3_probe4targets(cpqary3_t *);
 void cpqary3_cmdlist_release(cpqary3_cmdpvt_t *, uint8_t);
-int cpqary3_submit(cpqary3_t *, uint32_t);
-void cpqary3_free_phyctgs_mem(cpqary3_phyctg_t *, uint8_t);
-caddr_t cpqary3_alloc_phyctgs_mem(cpqary3_t *, size_t, uint32_t *,
-    cpqary3_phyctg_t *);
+int cpqary3_submit(cpqary3_t *, cpqary3_command_t *);
 cpqary3_cmdpvt_t *cpqary3_cmdlist_occupy(cpqary3_t *);
-void cpqary3_synccmd_complete(cpqary3_cmdpvt_t *);
 void cpqary3_NOE_handler(cpqary3_cmdpvt_t *);
-uint8_t cpqary3_retrieve(cpqary3_t *);
-void cpqary3_synccmd_cleanup(cpqary3_cmdpvt_t *);
+int cpqary3_retrieve(cpqary3_t *);
+void cpqary3_retrieve_simple(cpqary3_t *, uint32_t, boolean_t *);
+void cpqary3_retrieve_performant(cpqary3_t *, uint32_t, boolean_t *);
 int cpqary3_target_geometry(struct scsi_address *);
 uint8_t cpqary3_send_abortcmd(cpqary3_t *, uint16_t, CommandList_t *);
 void cpqary3_memfini(cpqary3_t *, uint8_t);
-uint8_t cpqary3_init_ctlr(cpqary3_t *);
 int16_t cpqary3_meminit(cpqary3_t *);
 void cpqary3_noe_complete(cpqary3_cmdpvt_t *cpqary3_cmdpvtp);
-cpqary3_cmdpvt_t *cpqary3_synccmd_alloc(cpqary3_t *, size_t);
-void cpqary3_synccmd_free(cpqary3_t *, cpqary3_cmdpvt_t *);
-int cpqary3_synccmd_send(cpqary3_t *, cpqary3_cmdpvt_t *, clock_t, int);
 uint8_t cpqary3_poll_retrieve(cpqary3_t *cpqary3p, uint32_t poll_tag);
-uint8_t cpqary3_build_cmdlist(cpqary3_cmdpvt_t *cpqary3_cmdpvtp, uint32_t tid);
+uint8_t cpqary3_build_cmdlist(cpqary3_command_t *cpqary3_cmdpvtp, uint32_t tid);
 void cpqary3_lockup_check(cpqary3_t *);
+
+/*
+ * Memory management.
+ */
+#if 0
+void cpqary3_free_phyctgs_mem(cpqary3_phyctg_t *, uint8_t);
+caddr_t cpqary3_alloc_phyctgs_mem(cpqary3_t *, size_t, uint32_t *,
+    cpqary3_phyctg_t *);
+#endif
+
+/*
+ * Synchronous command routines.
+ */
+cpqary3_command_t *cpqary3_synccmd_alloc(cpqary3_t *, size_t);
+void cpqary3_synccmd_free(cpqary3_t *, cpqary3_command_t *);
+int cpqary3_synccmd_send(cpqary3_t *, cpqary3_command_t *, clock_t, int);
+void cpqary3_synccmd_complete(cpqary3_command_t *);
+
+/*
+ * Interrupt service routines.
+ */
+uint32_t cpqary3_isr_hw_simple(caddr_t);
+uint32_t cpqary3_isr_hw_performant(caddr_t);
+uint32_t cpqary3_sw_isr(caddr_t);
+
+/*
+ * Controller initialisation routines.
+ */
+int cpqary3_ctlr_init(cpqary3_t *);
+int cpqary3_ctlr_wait_for_state(cpqary3_t *, cpqary3_wait_state_t);
+
+/*
+ * Command object management.
+ */
+cpqary3_command_t *cpqary3_command_alloc(cpqary3_t *);
+cpqary3_command_internal_t *cpqary3_command_internal_alloc(cpqary3_t *, size_t);
+void cpqary3_command_free(cpqary3_command_t *);
+
+cpqary3_command_t *cpqary3_lookup_inflight(cpqary3_t *, uint32_t);
+
 
 #ifdef	__cplusplus
 }

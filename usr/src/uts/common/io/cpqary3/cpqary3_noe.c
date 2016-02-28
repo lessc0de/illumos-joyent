@@ -106,10 +106,10 @@ char *log_vol_status[] = {
  *			[Shall fail only if memory allocation issues exist]
  */
 uint8_t
-cpqary3_send_NOE_command(cpqary3_t *ctlr, cpqary3_cmdpvt_t *memp, uint8_t flag)
+cpqary3_send_NOE_command(cpqary3_t *ctlr, cpqary3_command_t *cpcm,
+    uint8_t flag)
 {
 	uint32_t		phys_addr = 0;
-	NoeBuffer 		*databuf;
 	CommandList_t		*cmdlist;
 	cpqary3_phyctg_t	*phys_handle;
 	int			rv;
@@ -135,37 +135,42 @@ cpqary3_send_NOE_command(cpqary3_t *ctlr, cpqary3_cmdpvt_t *memp, uint8_t flag)
 	 * If Failure, WARN and RETURN.
 	 */
 	if (CPQARY3_NOE_RESUBMIT == flag) {
-		if ((NULL == memp) || (NULL == memp->cmdlist_memaddr)) {
+		return (CPQARY3_FAILURE);
+#if 0
+		if (cpcm == NULL) {
 			cmn_err(CE_WARN, " CPQary3 : _send_NOE_command : "
 			    "Re-Use Not possible; CommandList NULL");
 			return (CPQARY3_FAILURE);
 		}
 
 		bzero(MEM2DRVPVT(memp)->sg, sizeof (NoeBuffer));
-		memp->cmdlist_memaddr->Header.Tag.drvinfo_n_err =
+		cpcm->cpcm_va_cmd->Header.Tag.drvinfo_n_err =
 		    CPQARY3_NOECMD_SUCCESS;
+#endif
+
 	} else if (CPQARY3_NOE_INIT == flag) {
-		phys_handle =
-		    (cpqary3_phyctg_t *)MEM_ZALLOC(sizeof (cpqary3_phyctg_t));
-		if (!phys_handle)
+		NoeBuffer *databuf;
+
+		if ((phys_handle = kmem_zalloc(sizeof (cpqary3_phyctg_t),
+		    KM_NOSLEEP)) == NULL) {
 			return (CPQARY3_FAILURE);
+		}
 
 		databuf = (NoeBuffer *)cpqary3_alloc_phyctgs_mem(ctlr,
 		    sizeof (NoeBuffer), &phys_addr, phys_handle);
-		if (!databuf) {
+		if (databuf == NULL) {
 			return (CPQARY3_FAILURE);
 		}
-		bzero(databuf, sizeof (NoeBuffer));
+		bzero(databuf, sizeof (*databuf));
 
-		if (NULL == (memp = cpqary3_cmdlist_occupy(ctlr))) {
+		if ((memp = cpqary3_cmdlist_occupy(ctlr)) == NULL) {
 			cpqary3_free_phyctgs_mem(phys_handle,
 			    CPQARY3_FREE_PHYCTG_MEM);
 			return (CPQARY3_FAILURE);
 		}
 
-		memp->driverdata = (cpqary3_private_t *)
-		    MEM_ZALLOC(sizeof (cpqary3_private_t));
-		if (NULL == memp->driverdata) {
+		if ((memp->driverdata = kmem_zalloc(sizeof (cpqary3_private_t),
+		    KM_NOSLEEP)) == NULL) {
 			cpqary3_free_phyctgs_mem(phys_handle,
 			    CPQARY3_FREE_PHYCTG_MEM);
 			cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);

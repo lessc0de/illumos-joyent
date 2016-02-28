@@ -135,8 +135,6 @@ extern "C" {
 
 #pragma pack(1)
 
-typedef uint64_t QWORD;
-
 /*
  * Structure for Tag field in the controller command structure
  * Bit 0	: Unused
@@ -144,16 +142,18 @@ typedef uint64_t QWORD;
  * Bits 2 & 3 	: Used by this driver to signify a host of situations
  * Bits 4-31 	: Used by driver to fill in tag and then used by controller
  * Bits 32-63 	: Reserved
+ *
+ * XXX NOOOOOOOOOOOOOOOOOOO
  */
 #define	CISS_CMD_ERROR		0x2
 typedef struct cpqary3_tag {
 	uint32_t	reserved:1;
-	uint32_t	drvinfo_n_err:3;
-	uint32_t	tag_value:28;
+	uint32_t	error:1;
+	uint32_t	tag_value:30;
 	uint32_t	unused;
 } cpqary3_tag_t;
 
-typedef union _SCSI3Addr_t {
+typedef union SCSI3Addr {
 	struct {
 		uint8_t Bus:6;
 		uint8_t Mode:2;
@@ -172,27 +172,27 @@ typedef union _SCSI3Addr_t {
 	} LogUnit;
 } SCSI3Addr_t;
 
-typedef struct _PhysDevAddr_t {
+typedef struct PhysDevAddr {
 	uint32_t    TargetId:24;
 	uint32_t    Bus:6;
 	uint32_t    Mode:2;
 	SCSI3Addr_t Target[2];
 } PhysDevAddr_t;
 
-typedef struct _LogDevAddr_t {
+typedef struct LogDevAddr {
 	uint32_t	VolId:30;
 	uint32_t	Mode:2;
 	uint8_t		reserved[4];
 } LogDevAddr_t;
 
-typedef union _LUNAddr_t {
+typedef union LUNAddr {
 	uint8_t		LunAddrBytes[8];
 	SCSI3Addr_t	SCSI3Lun[4];
 	PhysDevAddr_t	PhysDev;
 	LogDevAddr_t	LogDev;
 } LUNAddr_t;
 
-typedef struct _CommandListHeader_t {
+typedef struct CommandListHeader {
 	uint8_t		ReplyQueue;
 	uint8_t		SGList;
 	uint16_t	SGTotal;
@@ -200,7 +200,7 @@ typedef struct _CommandListHeader_t {
 	LUNAddr_t	LUN;			/* 20 */
 } CommandListHeader_t;
 
-typedef struct _RequestBlock_t {
+typedef struct RequestBlock {
 	uint8_t	CDBLen;
 	struct {
 		uint8_t	Type:3;
@@ -211,25 +211,25 @@ typedef struct _RequestBlock_t {
 	uint8_t		CDB[16];		/* 20 */
 } RequestBlock_t;
 
-typedef struct _ErrDescriptor_t {
-	QWORD		Addr;
+typedef struct ErrDescriptor {
+	uint64_t	Addr;
 	uint32_t	Len;			/* 12 */
 } ErrDescriptor_t;
 
-typedef struct _SGDescriptor_t {
-	QWORD		Addr;
+typedef struct SGDescriptor {
+	uint64_t	Addr;
 	uint32_t	Len;
 	uint32_t	Ext;			/* 16 */
 } SGDescriptor_t;
 
-typedef struct _CommandList_t {
+typedef struct CommandList {
 	CommandListHeader_t Header;		/* 20 */
 	RequestBlock_t Request;			/* 20, 40 */
 	ErrDescriptor_t ErrDesc;		/* 12, 52 */
 	SGDescriptor_t SG[CISS_MAXSGENTRIES];	/* 16*SG_MAXENTRIES=512, 564 */
 } CommandList_t;
 
-typedef union _MoreErrInfo_t {
+typedef union MoreErrInfo {
 	struct {
 		uint8_t		Reserved[3];
 		uint8_t		Type;
@@ -243,7 +243,7 @@ typedef union _MoreErrInfo_t {
 	} Invalid_Cmd;
 } MoreErrInfo_t;
 
-typedef struct _ErrorInfo_t {
+typedef struct ErrorInfo {
 	uint8_t		ScsiStatus;
 	uint8_t		SenseLen;
 	uint16_t	CommandStatus;
@@ -253,14 +253,14 @@ typedef struct _ErrorInfo_t {
 } ErrorInfo_t;
 
 /* Configuration Table Structure */
-typedef struct _HostWrite_t {
+typedef struct HostWrite {
 	uint32_t	TransportRequest;
 	uint32_t	Upper32Addr;
 	uint32_t	CoalIntDelay;
 	uint32_t	CoalIntCount;
 } HostWrite_t;
 
-typedef struct _CfgTable_t {
+typedef struct CfgTable {
 	uint8_t		Signature[4];
 	uint32_t	SpecValence;
 	uint32_t	TransportSupport;
@@ -282,7 +282,7 @@ typedef struct _CfgTable_t {
 	/* PERF */
 } CfgTable_t;
 
-typedef struct _CfgTrans_Perf_t {
+typedef struct CfgTrans_Perf {
 	uint32_t	BlockFetchCnt[8];
 	uint32_t	ReplyQSize;
 	uint32_t	ReplyQCount;
@@ -292,33 +292,20 @@ typedef struct _CfgTrans_Perf_t {
 	uint32_t	ReplyQAddr0High32;
 } CfgTrans_Perf_t;
 
-typedef struct _CfgTrans_MemQ_t {
+typedef struct CfgTrans_MemQ {
 	uint32_t	BlockFetchCnt[8];
 	uint32_t	CmdQSize;
 	uint32_t	CmdQOffset;
 	uint32_t	ReplyQSize;
 	uint32_t	ReplyQCount;
-	QWORD		ReplyQCntrAddr;
-	QWORD		ReplyQAddr[CISS_MAXREPLYQS];
+	uint64_t	ReplyQCntrAddr;
+	uint64_t	ReplyQAddr[CISS_MAXREPLYQS];
 } CfgTrans_MemQ_t;
 
-typedef union _CfgTrans_t {
+typedef union CfgTrans {
 	CfgTrans_Perf_t	*Perf;
 	CfgTrans_MemQ_t	*MemQ;
 } CfgTrans_t;
-
-#define	CPQARY3_REPLYQ_INIT_CYCLIC_IND	0x1
-typedef struct cpqary3_drvr_replyq {
-	uchar_t		cyclic_indicator;
-	uchar_t 	simple_cyclic_indicator;
-	caddr_t 	replyq_start_addr;
-	uint32_t	replyq_start_paddr;
-	uint32_t	*replyq_headptr;
-	uint32_t	*replyq_simple_ptr;
-	uint32_t	index;
-	uint32_t	simple_index;
-	uint32_t	max_index;
-} cpqary3_drvr_replyq_t;
 
 #pragma pack()
 

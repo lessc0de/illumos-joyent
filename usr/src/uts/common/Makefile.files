@@ -2149,9 +2149,10 @@ DR_SAS_OBJS = dr_sas.o
 #
 #	CPQARY3 module
 #
-CPQARY3_OBJS =	cpqary3.o cpqary3_noe.o cpqary3_talk2ctlr.o	\
+# XXX disabled cpqary3_noe.o cpqary3_ioctl.o
+CPQARY3_OBJS =	cpqary3.o cpqary3_talk2ctlr.o	\
 		cpqary3_isr.o cpqary3_transport.o cpqary3_mem.o	\
-		cpqary3_scsi.o cpqary3_util.o cpqary3_ioctl.o	\
+		cpqary3_scsi.o cpqary3_util.o	\
 		cpqary3_bd.o
 
 #

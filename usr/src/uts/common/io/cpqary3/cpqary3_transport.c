@@ -32,7 +32,7 @@ static int cpqary3_setcap(struct scsi_address *, char *, int, int);
 static int cpqary3_dma_alloc(cpqary3_t *, struct scsi_pkt *,
     struct buf *, int, int (*)());
 static int cpqary3_dma_move(struct scsi_pkt *, struct buf *, cpqary3_t *);
-static int cpqary3_handle_flag_nointr(cpqary3_cmdpvt_t *, struct scsi_pkt *);
+static int cpqary3_handle_flag_nointr(cpqary3_command_t *, struct scsi_pkt *);
 static int cpqary3_poll(cpqary3_t *, uint32_t);
 static void cpqary3_dmafree(struct scsi_address *, struct scsi_pkt *);
 static void cpqary3_dma_sync(struct scsi_address *, struct scsi_pkt *);
@@ -41,7 +41,7 @@ static struct scsi_pkt *cpqary3_init_pkt(struct scsi_address *,
     struct scsi_pkt *, struct buf *, int, int, int, int, int (*callback)(),
     caddr_t);
 static int cpqary3_additional_cmd(struct scsi_pkt *scsi_pktp, cpqary3_t *);
-void cpqary3_oscmd_complete(cpqary3_cmdpvt_t *);
+void cpqary3_oscmd_complete(cpqary3_command_t *);
 static uint8_t cpqary3_is_scsi_read_write(struct scsi_pkt *scsi_pktp);
 
 /*
@@ -119,15 +119,12 @@ cpqary3_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 
 	ctlr = (cpqary3_t *)hba_tran->tran_hba_private;
 
-	/* HPQacucli Changes */
-
 	extern int8_t	cpqary3_detect_target_geometry(cpqary3_t *);
 	if ((CPQARY3_SUCCESS == cpqary3_probe4targets(ctlr)) &&
 	    (ctlr->num_of_targets > 0)) {
 		(void) cpqary3_detect_target_geometry(ctlr);
 	}
 
-	/* HPQacucli Changes */
 	/*
 	 * Validate the Target ID
 	 * Validate Lun --Ver1.10--
@@ -178,10 +175,6 @@ cpqary3_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 static int
 cpqary3_tgt_probe(struct scsi_device *sd, int (*waitfunc)())
 {
-#ifdef CPQARY3_DEBUG
-	int	status;
-#endif
-
 	/*
 	 * Probe for the presence of the target, using the scsi_hba_probe().
 	 * It inturn issues the SCSI inquiry command that is serviced by our
@@ -200,18 +193,6 @@ cpqary3_tgt_probe(struct scsi_device *sd, int (*waitfunc)())
 	/* HPQacucli Changes */
 
 	return (scsi_hba_probe(sd, waitfunc));
-
-#ifdef CPQARY3_DEBUG
-
-	/* Comment the previous line of code */
-	status = scsi_hba_probe(sd, waitfunc);
-	cmn_err(CE_CONT, "CPQary3 : _tgt_probe : target = %d \n", SD2TGT(sd));
-	cmn_err(CE_CONT, "CPQary3 : _tgt_probe : scsi_hba_probe returned %d \n",
-	    status);
-	cmn_err(CE_CONT, "CPQary3 : _tgt_probe : Leaving \n");
-	return (status);
-
-#endif
 }
 
 /*
@@ -245,7 +226,7 @@ cpqary3_init_pkt(struct scsi_address *sa, struct scsi_pkt *scsi_pktp,
 	 * Else, get the next available resources for the same
 	 */
 
-	if (!scsi_pktp) {
+	if (scsi_pktp == NULL) {
 		scsi_pktp = scsi_hba_pkt_alloc(dip, sa, cmdlen, statuslen,
 		    tgtlen, sizeof (cpqary3_pkt_t), callback, NULL);
 		if (!scsi_pktp)
@@ -263,7 +244,7 @@ cpqary3_init_pkt(struct scsi_address *sa, struct scsi_pkt *scsi_pktp,
 		cpqary3_pktp->cdb_len = cmdlen;
 		cpqary3_pktp->scb_len = statuslen;
 		cpqary3_pktp->cmd_dmahandle = NULL;
-		cpqary3_pktp->memp = (cpqary3_cmdpvt_t *)NULL;
+		cpqary3_pktp->cmd_command = NULL;
 
 		/*
 		 * Initialize to NULL all the fields of scsi_pktp, except
@@ -549,8 +530,9 @@ cpqary3_dma_move(struct scsi_pkt *scsi_pktp, struct buf *bp,
 		/* SG */
 		/* no. of DATA SEGMENTS */
 		if (i == cpqary3p->sg_cnt ||
-		    cpqary3_pktp->cmd_cookie == cpqary3_pktp->cmd_ncookies)
+		    cpqary3_pktp->cmd_cookie == cpqary3_pktp->cmd_ncookies) {
 			break;
+		}
 		/* SG */
 
 		ddi_dma_nextcookie(cpqary3_pktp->cmd_dmahandle,
@@ -582,7 +564,8 @@ cpqary3_transport(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 	cpqary3_t		*ctlr;
 	cpqary3_pkt_t		*cpqary3_pktp;
 	cpqary3_tgt_t		*tgtp;
-	cpqary3_cmdpvt_t	*memp;
+	cpqary3_command_t *cpcm;
+	int r;
 
 	ASSERT(sa != NULL);
 	ctlr = SA2CTLR(sa);
@@ -610,43 +593,44 @@ cpqary3_transport(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 	 * return TRAN_ACCEPT
 	 */
 
-	if (NULL == (memp = cpqary3_cmdlist_occupy(ctlr)))
+	if ((cpcm = cpqary3_command_alloc(ctlr)) == NULL) {
 		return (TRAN_BUSY);
+	}
 
-	cpqary3_pktp->memp = memp;
-	memp->pvt_pkt = cpqary3_pktp;
+	cpcm->cpcm_type = CPQARY3_CMDTYPE_OS;
+	cpqary3_pktp->cmd_command = cpcm;
+	cpcm->cpcm_private = cpqary3_pktp;
 
 	if ((cpqary3_pktp->cmd_flags & DDI_DMA_CONSISTENT) &&
 	    cpqary3_pktp->cmd_dmahandle) {
 		(void) ddi_dma_sync(cpqary3_pktp->cmd_dmahandle, 0, 0,
 		    DDI_DMA_SYNC_FORDEV);
 	}
-	/* SG */
-	ASSERT(cpqary3_pktp->cmd_cookiecnt <= ctlr->sg_cnt);
-	/* SG */
 
-	/* PERF */
-	memp->complete = cpqary3_oscmd_complete;
-	/* PERF */
+	VERIFY(cpqary3_pktp->cmd_cookiecnt <= ctlr->sg_cnt);
 
-	if (cpqary3_build_cmdlist(memp, SA2TGT(sa)) == CPQARY3_SUCCESS) {
-		if (scsi_pktp->pkt_flags & FLAG_NOINTR) {
-			return (cpqary3_handle_flag_nointr(memp, scsi_pktp));
-		}
-		cpqary3_pktp->cmd_start_time = ddi_get_lbolt();
+	cpcm->cpcm_complete = cpqary3_oscmd_complete;
 
-		mutex_enter(&ctlr->hw_mutex);
-		if (cpqary3_submit(ctlr, memp->cmdlist_phyaddr) != 0) {
-			mutex_exit(&ctlr->hw_mutex);
-			cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);
-			return (TRAN_FATAL_ERROR);
-		}
-		mutex_exit(&ctlr->hw_mutex);
-
-		return (TRAN_ACCEPT);
+	if (cpqary3_build_cmdlist(cpcm, SA2TGT(sa)) != CPQARY3_SUCCESS) {
+		goto fail;
 	}
 
-	cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);
+	if ((scsi_pktp->pkt_flags & FLAG_NOINTR) != 0) {
+		return (cpqary3_handle_flag_nointr(cpcm, scsi_pktp));
+	}
+	cpqary3_pktp->cmd_start_time = ddi_get_lbolt();
+
+	mutex_enter(&ctlr->hw_mutex);
+	r = cpqary3_submit(ctlr, cpcm);
+	mutex_exit(&ctlr->hw_mutex);
+	if (r != 0) {
+		goto fail;
+	}
+
+	return (TRAN_ACCEPT);
+
+fail:
+	cpqary3_command_free(cpcm);
 	return (TRAN_FATAL_ERROR);
 }
 
@@ -786,12 +770,9 @@ cpqary3_reset(struct scsi_address *sa, int level)
 static int
 cpqary3_abort(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 {
-	uint32_t	tid;
-	cpqary3_t	*ctlr;
-
-	ASSERT(sa != NULL);
-	tid  = SA2TGT(sa);
-	ctlr = SA2CTLR(sa);
+	uint32_t tid = SA2TGT(sa);
+	cpqary3_t *cpq = SA2CTLR(sa);
+	CommandList_t *clp = NULL;
 
 	/*
 	 * If SCSI packet exists, abort that particular command.
@@ -799,13 +780,14 @@ cpqary3_abort(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 	 * In either of the cases, we shall have to wait after the abort
 	 * functions are called to return the status.
 	 */
+	if (scsi_pktp != NULL) {
+		cpqary3_pkt_t *pktp = (cpqary3_pkt_t *)scsi_pktp->
+		    pkt_ha_private;
 
-	if (!scsi_pktp) {
-		return (cpqary3_send_abortcmd(ctlr, tid,
-		    (CommandList_t *)NULL));
-	} else {
-		return (cpqary3_send_abortcmd(ctlr, tid, SP2CMD(scsi_pktp)));
+		clp = pktp->cmd_command->cpcm_va_cmd;
 	}
+
+	return (cpqary3_send_abortcmd(cpq, tid, clp));
 }
 
 /*
@@ -950,130 +932,82 @@ cpqary3_setcap(struct scsi_address *sa, char *capstr, int value, int tgtonly)
  * Return Values: 	TRAN_ACCEPT
  */
 static int
-cpqary3_handle_flag_nointr(cpqary3_cmdpvt_t *memp, struct scsi_pkt *scsi_pktp)
+cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 {
-	uint32_t		tag;
+	uint32_t		tag = cpcm->cpcm_tag;
 	uint32_t		simple_tag;
 	uint32_t		i;
-	cpqary3_t		*ctlr;
+	cpqary3_t		*ctlr = cpcm->cpcm_ctlr;
 	cpqary3_cmdpvt_t	*cpqary3_cmdpvtp;
 	uint32_t		CmdsOutMax;
 	uint32_t		no_cmds;
+	int ret;
 
-	RETURN_FAILURE_IF_NULL(memp);
-	tag = memp->tag.tag_value;
-	ctlr = memp->ctlr;
-	ctlr->poll_flag = CPQARY3_FALSE;
+	/*
+	 * XXX this function is totally fucked with the mutexes and so on.
+	 * fix it.
+	 */
 
 	/*
 	 * Before sumitting this command, ensure all commands pending
 	 * with the controller are completed.
 	 */
-
+	mutex_enter(&ctlr->sw_mutex);
+	mutex_enter(&ctlr->hw_mutex);
+	ctlr->cpq_intr_off = B_TRUE;
 	cpqary3_intr_onoff(ctlr, CPQARY3_INTR_DISABLE);
 	if (ctlr->host_support & 0x4)
 		cpqary3_lockup_intr_onoff(ctlr, CPQARY3_LOCKUP_INTR_DISABLE);
 
-	no_cmds = (uint32_t)((ctlr->ctlr_maxcmds / 3) * NO_OF_CMDLIST_IN_A_BLK);
-	mutex_enter(&ctlr->sw_mutex);
-
-	for (;;) {
-		ctlr->poll_flag = CPQARY3_FALSE;
-		for (i = 0; i < no_cmds; i++) {
-			cpqary3_cmdpvtp = &ctlr->cmdmemlistp->pool[i];
-			ASSERT(cpqary3_cmdpvtp != NULL);
-
-			if ((tag != cpqary3_cmdpvtp->tag.tag_value) &&
-			    (cpqary3_cmdpvtp->occupied == CPQARY3_OCCUPIED)) {
-				if (ctlr->noe_support == 1) {
-					if ((cpqary3_cmdpvtp->cmdlist_memaddr->
-					    Header.Tag.drvinfo_n_err ==
-					    CPQARY3_NOECMD_SUCCESS) ||
-					    (cpqary3_cmdpvtp->cmdpvt_flag ==
-					    CPQARY3_TIMEOUT))  {
-						continue;
-					}
-				} else {
-					if (cpqary3_cmdpvtp->cmdpvt_flag ==
-					    CPQARY3_TIMEOUT)  {
-						continue;
-					}
-				}
-				ctlr->poll_flag = CPQARY3_TRUE;
-			}
-			/* NOE */
-
-			if (ctlr->poll_flag == CPQARY3_TRUE) {
-				break;
-			}
-		}
-
-		if (ctlr->poll_flag == CPQARY3_TRUE) {
-			if (!(ctlr->bddef->bd_flags & SA_BD_SAS)) {
-				while ((simple_tag =
-				    ddi_get32(ctlr->opq_handle,
-				    (uint32_t *)ctlr->opq)) != 0xFFFFFFFF) {
-					CmdsOutMax = ctlr->ctlr_maxcmds;
-					if ((simple_tag >>
-					    CPQARY3_GET_MEM_TAG) >=
-					    ((CmdsOutMax / 3) * 3)) {
-						cmn_err(CE_WARN,
-						    "CPQary3 : HBA returned "
-						    "Spurious Tag");
-						return (CPQARY3_FAILURE);
-					}
-
-					cpqary3_cmdpvtp =
-					    &ctlr->cmdmemlistp->pool[
-					    simple_tag >> CPQARY3_GET_MEM_TAG];
-					cpqary3_cmdpvtp->cmdlist_memaddr->
-					    Header.Tag.drvinfo_n_err =
-					    (simple_tag & 0xF) >> 1;
-					cpqary3_cmdpvtp->complete(
-					    cpqary3_cmdpvtp);
-				}
-			} else {
-				mutex_exit(&ctlr->sw_mutex);
-				if (CPQARY3_SUCCESS != cpqary3_retrieve(ctlr)) {
-					drv_usecwait(1000);
-				}
-				mutex_enter(&ctlr->sw_mutex); /* Changes */
-			}
-		} else {
-			break;
-		}
+	while (avl_numnodes(&ctlr->cpq_inflight) > 0) {
+		(void) cpqary3_retrieve(ctlr);
+		drv_usecwait(1000);
 	}
 
-	mutex_enter(&ctlr->hw_mutex);
-	if (EIO == cpqary3_submit(ctlr, memp->cmdlist_phyaddr)) {
-		mutex_exit(&ctlr->hw_mutex);
-		mutex_exit(&ctlr->sw_mutex);
-		cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);
-		return (TRAN_FATAL_ERROR);
-	}
-
-	if (CPQARY3_FAILURE == cpqary3_poll(ctlr, tag)) {
-		scsi_pktp->pkt_reason = CMD_TIMEOUT;
-		scsi_pktp->pkt_statistics = STAT_TIMEOUT;
-		scsi_pktp->pkt_state = 0;
-		mutex_exit(&ctlr->hw_mutex);
-		mutex_exit(&ctlr->sw_mutex);
-		cpqary3_cmdlist_release(memp, CPQARY3_HOLD_SW_MUTEX);
-		cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
-		if (ctlr->host_support & 0x4)
-			cpqary3_lockup_intr_onoff(ctlr,
-			    CPQARY3_LOCKUP_INTR_ENABLE);
-		return (TRAN_ACCEPT);
-	} else {
-		mutex_exit(&ctlr->hw_mutex);
-		mutex_exit(&ctlr->sw_mutex);
+	if (cpqary3_submit(ctlr, cpcm) != 0) {
+		ctlr->cpq_intr_off = B_FALSE;
 		cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
 		if (ctlr->host_support & 0x4) {
 			cpqary3_lockup_intr_onoff(ctlr,
 			    CPQARY3_LOCKUP_INTR_ENABLE);
 		}
+
+		mutex_exit(&ctlr->hw_mutex);
+		mutex_exit(&ctlr->sw_mutex);
+
+		cpqary3_command_free(cpcm);
+		return (TRAN_FATAL_ERROR);
+	}
+
+	if (cpqary3_poll(ctlr, tag) != CPQARY3_SUCCESS) {
+		scsi_pktp->pkt_reason = CMD_TIMEOUT;
+		scsi_pktp->pkt_statistics = STAT_TIMEOUT;
+		scsi_pktp->pkt_state = 0;
+
+		ctlr->cpq_intr_off = B_FALSE;
+		cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
+		if (ctlr->host_support & 0x4) {
+			cpqary3_lockup_intr_onoff(ctlr,
+			    CPQARY3_LOCKUP_INTR_ENABLE);
+		}
+
+		mutex_exit(&ctlr->hw_mutex);
+		mutex_exit(&ctlr->sw_mutex);
+
+		cpqary3_command_free(cpcm);
 		return (TRAN_ACCEPT);
 	}
+
+	ctlr->cpq_intr_off = B_FALSE;
+	cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
+	if (ctlr->host_support & 0x4) {
+		cpqary3_lockup_intr_onoff(ctlr, CPQARY3_LOCKUP_INTR_ENABLE);
+	}
+
+	mutex_exit(&ctlr->hw_mutex);
+	mutex_exit(&ctlr->sw_mutex);
+
+	return (TRAN_ACCEPT);
 }
 
 /*
@@ -1085,13 +1019,16 @@ cpqary3_handle_flag_nointr(cpqary3_cmdpvt_t *memp, struct scsi_pkt *scsi_pktp)
  * Return Values: 	TRAN_ACCEPT
  */
 static int
-cpqary3_poll(cpqary3_t *ctlr, uint32_t tag)
+cpqary3_poll(cpqary3_t *cpq, uint32_t tag)
 {
-	uint32_t		ii = 0;
+	boolean_t found = B_FALSE;
+	unsigned tries = 0;
 
-	RETURN_FAILURE_IF_NULL(ctlr);
+	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
 
 	/*
+	 * XXX
 	 * POLL for the completion of the said command
 	 * Since, we had ensured that controller is empty, we need not
 	 * check for the complete Retrieved Q.
@@ -1100,18 +1037,28 @@ cpqary3_poll(cpqary3_t *ctlr, uint32_t tag)
 	 * if the polled command is completed, send back a success.
 	 */
 
-	for (;;) {	/* this function is called with both the locks held */
-		if (CPQARY3_SUCCESS != cpqary3_poll_retrieve(ctlr, tag)) {
-			ii++;
-			if (ii > 120000)
-				return (CPQARY3_FAILURE);
-			drv_usecwait(500);
-			continue;
-		}
+retry:
+	switch (cpq->cpq_ctlr_mode) {
+	case CPQARY3_CTLR_MODE_SIMPLE:
+		cpqary3_retrieve_simple(cpq, tag, &found);
 		break;
+	case CPQARY3_CTLR_MODE_PERFORMANT:
+		cpqary3_retrieve_performant(cpq, tag, &found);
+		break;
+	default:
+		panic("unknown controller mode");
 	}
 
-	return (CPQARY3_SUCCESS);
+	if (found) {
+		return (CPQARY3_SUCCESS);
+	}
+
+	if (tries++ < 120000) {
+		drv_usecwait(500);
+		goto retry;
+	}
+
+	return (CPQARY3_FAILURE);
 }
 
 static int
@@ -1186,50 +1133,46 @@ cpqary3_additional_cmd(struct scsi_pkt *scsi_pktp, cpqary3_t *ctlr)
  * Return Values:      	None
  */
 void
-cpqary3_oscmd_complete(cpqary3_cmdpvt_t *cpqary3_cmdpvtp)
+cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 {
-	cpqary3_t	*cpqary3p;
-	ErrorInfo_t	*errorinfop;
-	CommandList_t	*cmdlistp;
-	struct scsi_pkt	*scsi_pktp;
+	cpqary3_t	*cpqary3p = cpcm->cpcm_ctlr;
+	ErrorInfo_t	*errorinfop = cpcm->cpcm_va_err;
+	CommandList_t	*cmdlistp = cpcm->cpcm_va_cmd;
+	struct scsi_pkt	*scsi_pktp = cpcm->cpcm_private->scsi_cmd_pkt;
 
-	ASSERT(cpqary3_cmdpvtp != NULL);
+	VERIFY(MUTEX_HELD(&cpqary3p->sw_mutex));
+	VERIFY(cpcm->cpcm_type == CPQARY3_CMDTYPE_OS);
 
-	if (CPQARY3_TIMEOUT == cpqary3_cmdpvtp->cmdpvt_flag) {
-		cpqary3_cmdlist_release(cpqary3_cmdpvtp,
-		    CPQARY3_NO_MUTEX);
+	/*
+	 * XXX oops?
+	 */
+	if (cpcm->cpcm_free_on_complete) {
+		cpqary3_command_free(cpcm);
 		return;
 	}
 
-	cpqary3p = cpqary3_cmdpvtp->ctlr;
-	cmdlistp = cpqary3_cmdpvtp->cmdlist_memaddr;
-	errorinfop = cpqary3_cmdpvtp->errorinfop;
+	if (cmdlistp->Header.Tag.error != 0) {
+		mutex_exit(&cpqary3p->sw_mutex);
 
-	if (cmdlistp->Header.Tag.drvinfo_n_err == CPQARY3_OSCMD_SUCCESS) {
-		scsi_pktp = cpqary3_cmdpvtp->pvt_pkt->scsi_cmd_pkt;
+		cpqary3_command_free(cpcm);
+
 		scsi_pktp->pkt_reason = CMD_CMPLT;
 		scsi_pktp->pkt_statistics = 0;
 		scsi_pktp->pkt_state = STATE_GOT_BUS |
 		    STATE_GOT_TARGET | STATE_SENT_CMD |
 		    STATE_XFERRED_DATA | STATE_GOT_STATUS;
 
-		if (cpqary3_cmdpvtp->pvt_pkt->scsi_cmd_pkt->pkt_flags &
-		    FLAG_NOINTR) {
-			cpqary3_cmdlist_release(cpqary3_cmdpvtp,
-			    CPQARY3_NO_MUTEX);
-		} else {
-			cpqary3_cmdlist_release(cpqary3_cmdpvtp,
-			    CPQARY3_NO_MUTEX);
-
-			if (scsi_pktp->pkt_comp) {
-				mutex_exit(&cpqary3p->sw_mutex);
+		/*
+		 * XXX this is suspect...
+		 */
+		if ((scsi_pktp->pkt_flags & FLAG_NOINTR) == 0) {
+			if (scsi_pktp->pkt_comp != NULL) {
 				(*scsi_pktp->pkt_comp)(scsi_pktp);
-				mutex_enter(&cpqary3p->sw_mutex);
 			}
 		}
+
+		mutex_enter(&cpqary3p->sw_mutex);
 		return;
-	} else {
-		scsi_pktp = cpqary3_cmdpvtp->pvt_pkt->scsi_cmd_pkt;
 	}
 
 	switch (errorinfop->CommandStatus) {
@@ -1330,22 +1273,25 @@ cpqary3_oscmd_complete(cpqary3_cmdpvt_t *cpqary3_cmdpvtp)
 			bcopy((caddr_t)&errorinfop->SenseInfo[0],
 			    (caddr_t)(&arq_statusp->sts_sensedata),
 			    CPQARY3_MIN(errorinfop->SenseLen,
-			    cpqary3_cmdpvtp->pvt_pkt->scb_len));
+			    cpcm->cpcm_private->scb_len));
 			scsi_pktp->pkt_state |= STATE_ARQ_DONE;
 		}
 	}
 
-	if (cpqary3_cmdpvtp->pvt_pkt->scsi_cmd_pkt->pkt_flags & FLAG_NOINTR) {
-		cpqary3_cmdlist_release(cpqary3_cmdpvtp, CPQARY3_NO_MUTEX);
-	} else {
-		cpqary3_cmdlist_release(cpqary3_cmdpvtp, CPQARY3_NO_MUTEX);
+	mutex_exit(&cpqary3p->sw_mutex);
 
-		if (scsi_pktp->pkt_comp) {
-			mutex_exit(&cpqary3p->sw_mutex);
+	cpqary3_command_free(cpcm);
+
+	/*
+	 * XXX this is also suspicious.
+	 */
+	if ((scsi_pktp->pkt_flags & FLAG_NOINTR) == 0) {
+		if (scsi_pktp->pkt_comp != NULL) {
 			(*scsi_pktp->pkt_comp)(scsi_pktp);
-			mutex_enter(&cpqary3p->sw_mutex);
 		}
 	}
+
+	mutex_enter(&cpqary3p->sw_mutex);
 }
 
 static uint8_t

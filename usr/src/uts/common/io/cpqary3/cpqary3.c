@@ -36,7 +36,9 @@ int8_t cpqary3_detect_target_geometry(cpqary3_t *);
  * External Variable Definitions
  */
 
+#if 0
 extern cpqary3_driver_info_t gdriver_info;
+#endif
 
 /*
  * Global Variables Definitions
@@ -183,37 +185,28 @@ static struct modlinkage cpqary3_modlinkage = {
 int
 _init()
 {
-	int  retvalue;
+	int r;
 
 	/*
 	 * Allocate Soft State Resources; if failure, return.
 	 */
-	retvalue = ddi_soft_state_init(&cpqary3_state,
-	    sizeof (cpqary3_t), MAX_CTLRS);
-	VERIFY(retvalue == 0);
+	VERIFY0(ddi_soft_state_init(&cpqary3_state, sizeof (cpqary3_t),
+	    MAX_CTLRS));
 
-	/*
-	 * Initialise the HBA Interface.
-	 */
-	if (!(retvalue = scsi_hba_init(&cpqary3_modlinkage))) {
-		/* Load the driver */
-		if ((retvalue = mod_install(&cpqary3_modlinkage))) {
-			/*
-			 * Failed to load the driver, undo HBA interface
-			 * and soft state allocation.
-			 */
-			scsi_hba_fini(&cpqary3_modlinkage);
-			ddi_soft_state_fini(&cpqary3_state);
-		}
-	} else {
-		/*
-		 * Failed to register HBA interface, undo all soft state
-		 * allocation
-		 */
-		ddi_soft_state_fini(&cpqary3_state);
+	if ((r = scsi_hba_init(&cpqary3_modlinkage)) != 0) {
+		goto fail;
 	}
 
-	return (retvalue);
+	if ((r = mod_install(&cpqary3_modlinkage)) != 0) {
+		scsi_hba_fini(&cpqary3_modlinkage);
+		goto fail;
+	}
+
+	return (r);
+
+fail:
+	ddi_soft_state_fini(&cpqary3_state);
+	return (r);
 }
 
 /*
@@ -282,76 +275,74 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	uint32_t	instance;
 	uint32_t	retvalue;
 	uint32_t	cleanstatus = 0;
-	cpqary3_t	*cpqary3p;		/* per-controller */
+	cpqary3_t	*cpq;		/* per-controller */
 	ddi_dma_attr_t	tmp_dma_attr;
-
-	/* Return Failure, If the Command is other than - DDI_ATTACH. */
+	uint_t		(*hw_isr)(caddr_t);
 
 	if (attach_cmd != DDI_ATTACH)
 		return (DDI_FAILURE);
 
 	/* Get the Instance of the Device */
-
 	instance = ddi_get_instance(dip);
 
 	/* Allocate the per-device-instance soft state structure */
-
-	retvalue = ddi_soft_state_zalloc(cpqary3_state, instance);
-	VERIFY(retvalue == 0);
-
+	if (ddi_soft_state_zalloc(cpqary3_state, instance) != 0) {
+		dev_err(dip, CE_WARN, "could not allocate soft state");
+	}
 	cleanstatus |= CPQARY3_SOFTSTATE_ALLOC_DONE;
 
 	/* Per Controller Pointer */
-	cpqary3p = ddi_get_soft_state(cpqary3_state, instance);
-	if (!cpqary3p) {
-		cmn_err(CE_WARN, "CPQary3: Soft State Retrieval Failed");
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+	if ((cpq = ddi_get_soft_state(cpqary3_state, instance)) == NULL) {
+		dev_err(dip, CE_WARN, "could not get soft state");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 
 	/* Maintain a record in per-ctlr structure */
-	cpqary3p->dip = dip;
-	cpqary3p->instance = instance;
+	cpq->dip = dip;
+	cpq->instance = instance;
+	cpq->cpq_next_tag = 0x54321;
 
 	/* Get the User Configuration information from Driver's conf File */
-	cpqary3_read_conf_file(dip, cpqary3p);
+	cpqary3_read_conf_file(dip, cpq);
 
 	/* Get and Map the HW Configuration */
-	retvalue = cpqary3_update_ctlrdetails(cpqary3p, &cleanstatus);
-	if (retvalue == CPQARY3_FAILURE) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+	if (cpqary3_update_ctlrdetails(cpq, &cleanstatus) != CPQARY3_SUCCESS) {
+		dev_err(dip, CE_WARN, "cpqary3_update_ctlrdetails failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 
 	/* Get the Cookie for hardware Interrupt Handler */
-	if (ddi_get_iblock_cookie(dip, 0, &cpqary3p->hw_iblock_cookie) !=
+	if (ddi_get_iblock_cookie(dip, 0, &cpq->hw_iblock_cookie) !=
 	    DDI_SUCCESS) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+		dev_err(dip, CE_WARN, "ddi_get_iblock_cookie (hw) failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 
 	/* Initialize Per Controller Mutex */
-	mutex_init(&cpqary3p->hw_mutex, NULL, MUTEX_DRIVER,
-	    (void *)cpqary3p->hw_iblock_cookie);
-
+	mutex_init(&cpq->hw_mutex, NULL, MUTEX_DRIVER,
+	    (void *)cpq->hw_iblock_cookie);
 	cleanstatus |= CPQARY3_MUTEX_INIT_DONE;
 
 	/* Get the Cookie for Soft(low level) Interrupt Handler */
 	if (ddi_get_soft_iblock_cookie(dip, DDI_SOFTINT_HIGH,
-	    &cpqary3p->sw_iblock_cookie) != DDI_SUCCESS) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+	    &cpq->sw_iblock_cookie) != DDI_SUCCESS) {
+		dev_err(dip, CE_WARN, "ddi_get_iblock_cookie (sw) failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 
 	/* Initialize the s/w Mutex */
-	mutex_init(&cpqary3p->sw_mutex, NULL, MUTEX_DRIVER,
-	    (void *)cpqary3p->sw_iblock_cookie);
+	mutex_init(&cpq->sw_mutex, NULL, MUTEX_DRIVER,
+	    (void *)cpq->sw_iblock_cookie);
 	cleanstatus |= CPQARY3_SW_MUTEX_INIT_DONE;
 
 	/* Initialize per Controller private details */
-	retvalue = cpqary3_init_ctlr_resource(cpqary3p);
-	if (retvalue != CPQARY3_SUCCESS) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+	if (cpqary3_init_ctlr_resource(cpq) != CPQARY3_SUCCESS) {
+		dev_err(dip, CE_WARN, "cpqary3_init_ctlr_resource failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 	cleanstatus |= CPQARY3_CTLR_CONFIG_DONE;
@@ -359,9 +350,10 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	/*
 	 * Allocate HBA transport structure
 	 */
-	cpqary3p->hba_tran = scsi_hba_tran_alloc(dip, SCSI_HBA_CANSLEEP);
-	if (!cpqary3p->hba_tran) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+	if ((cpq->hba_tran = scsi_hba_tran_alloc(dip, SCSI_HBA_CANSLEEP)) ==
+	    NULL) {
+		dev_err(dip, CE_WARN, "scsi_hba_tran_alloc failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 	cleanstatus |= CPQARY3_HBA_TRAN_ALLOC_DONE;
@@ -371,21 +363,19 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	 * Initialise the HBA tran entry points.
 	 * Attach the controller to HBA.
 	 */
-	cpqary3_init_hbatran(cpqary3p);
+	cpqary3_init_hbatran(cpq);
 
-	/* PERF */
-	/* SG */
 	tmp_dma_attr = cpqary3_dma_attr;
-	tmp_dma_attr.dma_attr_sgllen = cpqary3p->sg_cnt;
-	/* SG */
-	/* PERF */
+	tmp_dma_attr.dma_attr_sgllen = cpq->sg_cnt;
+
 	/*
 	 * Register the DMA attributes and the transport vectors
 	 * of each instance of the  HBA device.
 	 */
-	if (scsi_hba_attach_setup(dip, &tmp_dma_attr, cpqary3p->hba_tran,
+	if (scsi_hba_attach_setup(dip, &tmp_dma_attr, cpq->hba_tran,
 	    SCSI_HBA_TRAN_CLONE) == DDI_FAILURE) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+		dev_err(dip, CE_WARN, "scsi_hba_attach_setup failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 	cleanstatus |= CPQARY3_HBA_TRAN_ATTACH_DONE;
@@ -408,37 +398,54 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 		cleanstatus |= CPQARY3_CREATE_MINOR_NODE;
 	} else {
 		cmn_err(CE_NOTE, "CPQary3 : Failed to create minor node");
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 
-
 	/* Register Software Interrupt Handler */
 	if (ddi_add_softintr(dip,  DDI_SOFTINT_HIGH,
-	    &cpqary3p->cpqary3_softintr_id, &cpqary3p->sw_iblock_cookie, NULL,
-	    cpqary3_sw_isr, (caddr_t)cpqary3p) != DDI_SUCCESS) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+	    &cpq->cpqary3_softintr_id, &cpq->sw_iblock_cookie, NULL,
+	    cpqary3_sw_isr, (caddr_t)cpq) != DDI_SUCCESS) {
+		dev_err(dip, CE_WARN, "ddi_add_softintr failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 	cleanstatus |= CPQARY3_SW_INTR_HDLR_SET;
 
+	/*
+	 * Select the correct hardware interrupt service routine for the
+	 * Transport Method we have configured:
+	 */
+	switch (cpq->cpq_ctlr_mode) {
+	case CPQARY3_CTLR_MODE_SIMPLE:
+		hw_isr = cpqary3_isr_hw_simple;
+		break;
+	case CPQARY3_CTLR_MODE_PERFORMANT:
+		hw_isr = cpqary3_isr_hw_performant;
+		break;
+	default:
+		panic("unknown controller mode");
+	}
+
 	/* Register Interrupt Handler */
-	if (ddi_add_intr(dip, 0, &cpqary3p->hw_iblock_cookie, NULL,
-	    cpqary3_hw_isr, (caddr_t)cpqary3p) != DDI_SUCCESS) {
-		cpqary3_cleanup(cpqary3p, cleanstatus);
+	if (ddi_add_intr(dip, 0, &cpq->hw_iblock_cookie, NULL, hw_isr,
+	    (caddr_t)cpq) != DDI_SUCCESS) {
+		dev_err(dip, CE_WARN, "ddi_add_intr (hw) failed");
+		cpqary3_cleanup(cpq, cleanstatus);
 		return (DDI_FAILURE);
 	}
 	cleanstatus |= CPQARY3_INTR_HDLR_SET;
 
 	/* Enable the Controller Interrupt */
-	cpqary3_intr_onoff(cpqary3p, CPQARY3_INTR_ENABLE);
-	if (cpqary3p->host_support & 0x4)
-		cpqary3_lockup_intr_onoff(cpqary3p, CPQARY3_LOCKUP_INTR_ENABLE);
+	cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+	if (cpq->host_support & 0x4) {
+		cpqary3_lockup_intr_onoff(cpq, CPQARY3_LOCKUP_INTR_ENABLE);
+	}
 
 	/*
 	 * Register a periodic function to be called every 15 seconds.
 	 */
-	cpqary3p->cpq_periodic = ddi_periodic_add(cpqary3_periodic, cpqary3p,
+	cpq->cpq_periodic = ddi_periodic_add(cpqary3_periodic, cpq,
 	    15 * NANOSEC, DDI_IPL_0);
 	cleanstatus |= CPQARY3_TICK_TMOUT_REGD;
 
@@ -448,6 +455,10 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	 * the driver
 	 */
 
+	/*
+	 * XXX OK, maybe later...
+	 */
+#if 0
 	/* NOE */
 	if (cpqary3p->noe_support == 1) {
 		/* Enable the Notification on Event in this controller */
@@ -461,6 +472,7 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 		}
 	}
 	/* NOE */
+#endif
 
 	/* Report that an Instance of the Driver is Attached Successfully */
 	ddi_report_dev(dip);
@@ -470,10 +482,12 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	 * This is required for the agents
 	 */
 
+#if 0
 	gdriver_info.num_ctlr++;
+#endif
 
+	dev_err(dip, CE_WARN, "attach complete");
 	return (DDI_SUCCESS);
-
 }
 
 /*
@@ -531,6 +545,7 @@ int
 cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
     int *retvaluep)
 {
+
 	minor_t		cpqary3_minor_num;
 	cpqary3_t	*cpqary3p;
 	int		instance;
@@ -578,6 +593,7 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	/* HPQacucli Changes */
 
 	switch (cmd) {
+#if 0
 		case CPQARY3_IOCTL_DRIVER_INFO:
 			*retvaluep =
 			    cpqary3_ioctl_driver_info(arg, mode);
@@ -598,12 +614,12 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 			    cpqary3_ioctl_scsi_pass(arg, cpqary3p, mode);
 			break;
 
+#endif
 		default:
 			*retvaluep = EINVAL;
 			break;
 	}
 		return (*retvaluep);
-
 
 }
 
@@ -631,6 +647,10 @@ cpqary3_cleanup(cpqary3_t *cpqary3p, uint32_t status)
 	 */
 
 	/*
+	 * XXX maybe later
+	 */
+#if 0
+	/*
 	 * We have removed NOE functionality from the
 	 * driver. So commenting the below piece of code
 	 */
@@ -650,6 +670,7 @@ cpqary3_cleanup(cpqary3_t *cpqary3p, uint32_t status)
 			mutex_exit(&cpqary3p->hw_mutex);
 		}
 	}
+#endif
 
 	/*
 	 * Detach the device
@@ -697,14 +718,16 @@ cpqary3_cleanup(cpqary3_t *cpqary3p, uint32_t status)
 		for (targ = 0; targ < CPQARY3_MAX_TGT;  targ++) {
 			if (cpqary3p->cpqary3_tgtp[targ] == NULL)
 				continue;
-			MEM_SFREE(cpqary3p->cpqary3_tgtp[targ],
+			kmem_free(cpqary3p->cpqary3_tgtp[targ],
 			    sizeof (cpqary3_tgt_t));
 		}
 
 		mutex_exit(&cpqary3p->hw_mutex);
 
+#if 0
 		cpqary3_memfini(cpqary3p, CPQARY3_MEMLIST_DONE |
 		    CPQARY3_PHYCTGS_DONE | CPQARY3_CMDMEM_DONE);
+#endif
 	}
 
 	if (status & CPQARY3_SW_MUTEX_INIT_DONE)
@@ -832,7 +855,7 @@ cpqary3_update_ctlrdetails(cpqary3_t *cpqary3p, uint32_t *cleanstatus)
 	mem_bar0 = mem_64_bar0;
 	mem_bar1 = mem_64_bar1;
 
-	MEM_SFREE(regp, reglen);
+	kmem_free(regp, reglen);
 
 	/*
 	 * Setup resources to access the Local PCI Bus
@@ -868,6 +891,8 @@ cpqary3_update_ctlrdetails(cpqary3_t *cpqary3p, uint32_t *cleanstatus)
 	}
 	map_len = cpqary3p->bddef->bd_maplen;
 	(void) strcpy(cpqary3p->hba_name, cpqary3p->bddef->bd_dispname);
+
+	dev_err(cpqary3p->dip, CE_WARN, "controller: %s", cpqary3p->hba_name);
 
 	/*
 	 * Set up a mapping for the following registers:

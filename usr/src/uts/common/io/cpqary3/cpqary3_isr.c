@@ -16,118 +16,85 @@
 
 #include "cpqary3.h"
 
-/*
- * Function	: 	cpqary3_hw_isr
- * Description	: 	This routine determines if this instance of the
- * 			HBA interrupted and if positive triggers a software
- *			interrupt.
- *			For SAS controllers which operate in performant mode
- *			we clear the interrupt.
- *			For CISS controllers which operate in simple mode
- *			we get the tag value.
- * Called By	: 	kernel
- * Parameters	: 	per-controller
- * Calls	: 	cpqary3_check_ctlr_intr()
- * Return Values: 	DDI_INTR_CLAIMED/UNCLAIMED
- *			[We either CLAIM the interrupt or Discard it]
- */
-uint_t
-cpqary3_hw_isr(caddr_t per_ctlr)
+
+static void
+cpqary3_trigger_sw_isr(cpqary3_t *cpq)
 {
-	boolean_t		need_swintr;
-	cpqary3_t		*cpqary3p = (cpqary3_t *)per_ctlr;
-	cpqary3_drvr_replyq_t	*replyq_ptr;
-	volatile CfgTable_t	*ctp = cpqary3p->ct;
-	uint32_t		spr0;
-	uint32_t		doorbell_status;
-	uint32_t		tag;
+	boolean_t trigger = B_FALSE;
 
-	replyq_ptr = (cpqary3_drvr_replyq_t *)cpqary3p->drvr_replyq;
+	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
 
+	if (!cpq->cpq_swintr_flag) {
+		trigger = B_TRUE;
+		cpq->cpq_swintr_flag = B_TRUE;
+	}
 
-	/*
-	 * Check the Interrupt Status Register to see if the Outbound
-	 * Post List FIFO is not empty.
-	 */
-	if (cpqary3p->check_ctlr_intr(cpqary3p) != CPQARY3_SUCCESS) {
+	if (trigger) {
+		ddi_trigger_softintr(cpq->cpqary3_softintr_id);
+	}
+}
+
+uint_t
+cpqary3_isr_hw_simple(caddr_t arg)
+{
+	cpqary3_t *cpq = (cpqary3_t *)arg;
+	uint32_t isr = ddi_get32(cpq->isr_handle, cpq->isr);
+
+	mutex_enter(&cpq->hw_mutex);
+	if ((isr & cpq->bddef->bd_intrpendmask) == 0) {
 		/*
 		 * Check to see if the firmware has come to rest.  If it has,
 		 * this routine will panic the system.
 		 */
-		cpqary3_lockup_check(cpqary3p);
+		cpqary3_lockup_check(cpq);
 
+		mutex_exit(&cpq->hw_mutex);
 		return (DDI_INTR_UNCLAIMED);
 	}
 
 	/*
-	 * We decided that we will have only one retrieve function for
-	 * both simple and performant mode. To achieve this we have to mimic
-	 * what controller does for performant mode in simple mode.
-	 * For simple mode we are making replq_simple_ptr and
-	 * replq_headptr of performant
-	 * mode point to the same location in the reply queue.
-	 * For the performant mode, we clear the interrupt
+	 * Disable interrupts until the soft interrupt handler has had a chance
+	 * to read and process replies.
 	 */
+	cpqary3_intr_onoff(cpq, CPQARY3_INTR_DISABLE);
 
-	if (!(cpqary3p->bddef->bd_flags & SA_BD_SAS)) {
-		while ((tag = ddi_get32(cpqary3p->opq_handle,
-		    (uint32_t *)cpqary3p->opq)) != 0xFFFFFFFF) {
-			replyq_ptr->replyq_simple_ptr[0] = tag;
-			replyq_ptr->replyq_simple_ptr[0] |=
-			    replyq_ptr->simple_cyclic_indicator;
-			++replyq_ptr->simple_index;
+	cpqary3_trigger_sw_isr(cpq);
 
-			if (replyq_ptr->simple_index == replyq_ptr->max_index) {
-				replyq_ptr->simple_index = 0;
-				/* Toggle at wraparound */
-				replyq_ptr->simple_cyclic_indicator =
-				    (replyq_ptr->simple_cyclic_indicator == 0) ?
-				    1 : 0;
-				replyq_ptr->replyq_simple_ptr =
-				    /* LINTED: alignment */
-				    (uint32_t *)(replyq_ptr->replyq_start_addr);
-			} else {
-				replyq_ptr->replyq_simple_ptr += 2;
-			}
-		}
-	} else {
-		doorbell_status = ddi_get32(cpqary3p->odr_handle,
-		    (uint32_t *)cpqary3p->odr);
-		if (doorbell_status & 0x1) {
-			ddi_put32(cpqary3p->odr_cl_handle,
-			    (uint32_t *)cpqary3p->odr_cl,
-			    (ddi_get32(cpqary3p->odr_cl_handle,
-			    (uint32_t *)cpqary3p->odr_cl) | 0x1));
-			doorbell_status = ddi_get32(cpqary3p->odr_handle,
-			    (uint32_t *)cpqary3p->odr);
-		}
+	mutex_exit(&cpq->hw_mutex);
+	return (DDI_INTR_CLAIMED);
+}
+
+uint_t
+cpqary3_isr_hw_performant(caddr_t arg)
+{
+	cpqary3_t *cpq = (cpqary3_t *)arg;
+	uint32_t isr = ddi_get32(cpq->isr_handle, cpq->isr);
+
+	if (isr == 0) {
+		/*
+		 * Check to see if the firmware has come to rest.  If it has,
+		 * this routine will panic the system.
+		 */
+		cpqary3_lockup_check(cpq);
+
+		return (DDI_INTR_UNCLAIMED);
 	}
 
-	/* PERF */
+	uint32_t odr = ddi_get32(cpq->odr_handle, cpq->odr);
+	if ((odr & 0x1) != 0) {
+		uint32_t odr_cl = ddi_get32(cpq->odr_cl_handle, cpq->odr_cl);
 
-	/*
-	 * If s/w interrupt handler is already running, do not trigger another
-	 * since packets have already been transferred to Retrieved Q.
-	 * Else, Set swintr_flag to state to the s/w interrupt handler
-	 * that it has a job to do.
-	 * trigger the s/w interrupt handler
-	 * Claim the interrupt
-	 */
+		odr_cl |= 0x1;
+		ddi_put32(cpq->odr_cl_handle, cpq->odr_cl, odr_cl);
 
-	mutex_enter(&cpqary3p->hw_mutex);
-
-	if (cpqary3p->swintr_flag == CPQARY3_TRUE) {
-		need_swintr = B_FALSE;
-	} else {
-		need_swintr = B_TRUE;
-		cpqary3p->swintr_flag = CPQARY3_TRUE;
+		/*
+		 * Read the status register again to ensure the write to clear
+		 * is flushed to the controller.
+		 */
+		(void) ddi_get32(cpq->odr_handle, cpq->odr);
 	}
 
-	mutex_exit(&cpqary3p->hw_mutex);
-
-	if (need_swintr) {
-		ddi_trigger_softintr(cpqary3p->cpqary3_softintr_id);
-	}
+	cpqary3_trigger_sw_isr(cpq);
 
 	return (DDI_INTR_CLAIMED);
 }
@@ -145,33 +112,46 @@ cpqary3_hw_isr(caddr_t per_ctlr)
  *			[We either CLAIM the interrupr or DON'T]
  */
 uint_t
-cpqary3_sw_isr(caddr_t per_ctlr)
+cpqary3_sw_isr(caddr_t arg)
 {
-	cpqary3_t	*cpqary3p;
-
-	cpqary3p = (void *)per_ctlr;
-	if (!cpqary3p) {
-		cmn_err(CE_PANIC, "CPQary3 : Software Interrupt Service "
-		    "Routine invoked with NULL pointer argument \n");
-	}
+	cpqary3_t *cpq = (cpqary3_t *)arg;
 
 	/*
-	 * Ensure that our hardware routine actually triggered this routine.
-	 * If it was not the case, do NOT CLAIM the interrupt
+	 * Confirm that the hardware interrupt routine scheduled this
+	 * software interrupt, and if so, acknowledge it.
 	 */
-
-	mutex_enter(&cpqary3p->hw_mutex);
-	if (CPQARY3_TRUE != cpqary3p->swintr_flag) {
-		mutex_exit(&cpqary3p->hw_mutex);
+	mutex_enter(&cpq->sw_mutex);
+	mutex_enter(&cpq->hw_mutex);
+	if (!cpq->cpq_swintr_flag) {
+		mutex_exit(&cpq->hw_mutex);
+		mutex_exit(&cpq->sw_mutex);
 		return (DDI_INTR_UNCLAIMED);
 	}
 
-	cpqary3p->swintr_flag = CPQARY3_FALSE;
+	switch (cpq->cpq_ctlr_mode) {
+	case CPQARY3_CTLR_MODE_SIMPLE:
+		cpqary3_retrieve_simple(cpq, 0, NULL);
+		/*
+		 * XXX need to manage interrupts better
+		 */
+		if (!cpq->cpq_intr_off) {
+			cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+		}
+		goto complete;
 
-	/* PERF */
-	mutex_exit(&cpqary3p->hw_mutex);
-	(void) cpqary3_retrieve(cpqary3p);
-	/* PERF */
+	case CPQARY3_CTLR_MODE_PERFORMANT:
+		cpqary3_retrieve_performant(cpq, 0, NULL);
+		goto complete;
 
+	case CPQARY3_CTLR_MODE_UNKNOWN:
+		break;
+	}
+
+	panic("unknown controller mode");
+
+complete:
+	cpq->cpq_swintr_flag = B_FALSE;
+	mutex_exit(&cpq->hw_mutex);
+	mutex_exit(&cpq->sw_mutex);
 	return (DDI_INTR_CLAIMED);
 }

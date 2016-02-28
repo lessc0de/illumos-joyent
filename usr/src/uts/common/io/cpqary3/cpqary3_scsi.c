@@ -42,20 +42,15 @@ cpqary3_probe4targets(cpqary3_t *cpqary3p)
 {
 	uint8_t rv;
 
-	rv = cpqary3_probe4LVs(cpqary3p);
-
-	if (CPQARY3_FAILURE == rv) {
+	if ((rv = cpqary3_probe4LVs(cpqary3p)) != CPQARY3_SUCCESS) {
 		return (rv);
 	}
 
-	rv = cpqary3_probe4Tapes(cpqary3p);
-
-	if (CPQARY3_FAILURE == rv) {
+	if ((rv = cpqary3_probe4Tapes(cpqary3p)) != CPQARY3_SUCCESS) {
 		return (rv);
 	}
 
 	return (CPQARY3_SUCCESS);
-
 }
 
 /*
@@ -69,33 +64,24 @@ cpqary3_probe4targets(cpqary3_t *cpqary3p)
  *			FAILURE		: 	Build has Failed
  */
 uint8_t
-cpqary3_build_cmdlist(cpqary3_cmdpvt_t *cpqary3_cmdpvtp, uint32_t tid)
+cpqary3_build_cmdlist(cpqary3_command_t *cpcm, uint32_t tid)
 {
 	int		cntr;
-	cpqary3_t	*cpqary3p;
-	struct buf	*bfp;
+	cpqary3_t	*cpq = cpcm->cpcm_ctlr;
 	cpqary3_tgt_t	*tgtp;
 	CommandList_t	*cmdlistp;
+	cpqary3_pkt_t	*pkt = cpcm->cpcm_private;
+	struct buf	*bfp = pkt->bf;
 
-	RETURN_FAILURE_IF_NULL(cpqary3_cmdpvtp);
-
-	if (NULL == (cpqary3p = cpqary3_cmdpvtp->ctlr))
-		return (CPQARY3_FAILURE);
-
-	bfp = (struct buf *)cpqary3_cmdpvtp->pvt_pkt->bf;
-
-	tgtp = cpqary3p->cpqary3_tgtp[tid];
-
-	if (!tgtp) {
+	if ((tgtp = cpq->cpqary3_tgtp[tid]) == NULL) {
 		return (CPQARY3_FAILURE);
 	}
 
-	cmdlistp = cpqary3_cmdpvtp->cmdlist_memaddr;
+	cmdlistp = cpcm->cpcm_va_cmd;
 
 	/* Update Cmd Header */
-	cmdlistp->Header.SGList = cpqary3_cmdpvtp->pvt_pkt->cmd_cookiecnt;
-	cmdlistp->Header.SGTotal = cpqary3_cmdpvtp->pvt_pkt->cmd_cookiecnt;
-	cmdlistp->Header.Tag.drvinfo_n_err = CPQARY3_OSCMD_SUCCESS;
+	cmdlistp->Header.SGList = pkt->cmd_cookiecnt;
+	cmdlistp->Header.SGTotal = pkt->cmd_cookiecnt;
 
 	if (tgtp->type == CPQARY3_TARGET_CTLR) {
 		cmdlistp->Header.LUN.PhysDev.TargetId = 0;
@@ -112,11 +98,9 @@ cpqary3_build_cmdlist(cpqary3_cmdpvt_t *cpqary3_cmdpvtp, uint32_t tid)
 	}
 
 	/* Cmd Request */
-	cmdlistp->Request.CDBLen = cpqary3_cmdpvtp->pvt_pkt->cdb_len;
+	cmdlistp->Request.CDBLen = pkt->cdb_len;
 
-	bcopy((caddr_t)cpqary3_cmdpvtp->pvt_pkt->scsi_cmd_pkt->pkt_cdbp,
-	    (caddr_t)cmdlistp->Request.CDB, cpqary3_cmdpvtp->pvt_pkt->cdb_len);
-
+	bcopy(pkt->scsi_cmd_pkt->pkt_cdbp, cmdlistp->Request.CDB, pkt->cdb_len);
 
 	cmdlistp->Request.Type.Type = CISS_TYPE_CMD;
 	cmdlistp->Request.Type.Attribute = CISS_ATTR_ORDERED;
@@ -137,28 +121,27 @@ cpqary3_build_cmdlist(cpqary3_cmdpvt_t *cpqary3_cmdpvtp, uint32_t tid)
 	 */
 
 	switch (cmdlistp->Request.CDB[0]) {
-		case 0x08:
-		case 0x28:
-			cmdlistp->Request.Type.Direction = CISS_XFER_READ;
-			break;
-		case 0x0A:
-		case 0x2A:
-			cmdlistp->Request.Type.Direction = CISS_XFER_WRITE;
-			break;
+	case 0x08: /* XXX ? */
+	case 0x28: /* XXX ? */
+		cmdlistp->Request.Type.Direction = CISS_XFER_READ;
+		break;
+	case 0x0A: /* XXX ? */
+	case 0x2A: /* XXX ? */
+		cmdlistp->Request.Type.Direction = CISS_XFER_WRITE;
+		break;
 	}
+
 	/*
 	 * NEED to increase this TimeOut value when the concerned
 	 * targets are tape devices(i.e., we need to do it here manually).
 	 */
-	cmdlistp->Request.Timeout = 2 *
-	    (cpqary3_cmdpvtp->pvt_pkt->scsi_cmd_pkt->pkt_time);
+	cmdlistp->Request.Timeout = 2 * pkt->scsi_cmd_pkt->pkt_time;
 
-	for (cntr = 0; cntr < cpqary3_cmdpvtp->pvt_pkt->cmd_cookiecnt; cntr++) {
+	for (cntr = 0; cntr < pkt->cmd_cookiecnt; cntr++) {
 		cmdlistp->SG[cntr].Addr =
-		    cpqary3_cmdpvtp->pvt_pkt->
-		    cmd_dmacookies[cntr].dmac_laddress;
+		    pkt->cmd_dmacookies[cntr].dmac_laddress;
 		cmdlistp->SG[cntr].Len = (uint32_t)
-		    cpqary3_cmdpvtp->pvt_pkt->cmd_dmacookies[cntr].dmac_size;
+		    pkt->cmd_dmacookies[cntr].dmac_size;
 	}
 
 	return (CPQARY3_SUCCESS);
@@ -183,20 +166,13 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
 	CommandList_t		*cmdlistp;
 	cpqary3_tgt_t		*cpqtgtp;
 	cpqary3_tag_t		*cpqary3_tagp;
-	cpqary3_cmdpvt_t	*cpqary3_cmdpvtp;
+	cpqary3_command_t	*cpcm;
 
-	/*
-	 * NOTE : DO NOT perform this operation for cmdlist2abortp.
-	 * It may be NULL
-	 */
-	RETURN_FAILURE_IF_NULL(cpqary3p);
-
-	if (target_id == CTLR_SCSI_ID)
+	if (target_id == CTLR_SCSI_ID) {
 		return (CPQARY3_FAILURE);
+	}
 
-	cpqtgtp = cpqary3p->cpqary3_tgtp[target_id];
-
-	if (!cpqtgtp) {
+	if ((cpqtgtp = cpqary3p->cpqary3_tgtp[target_id]) == NULL) {
 		return (CPQARY3_FAILURE);
 	}
 
@@ -207,15 +183,12 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
 	 */
 
 	/* BGB: CVFIX -> Introduced the call to cpqary3_synccmd_alloc */
-	cpqary3_cmdpvtp = cpqary3_synccmd_alloc(cpqary3p, 0);
-	if (cpqary3_cmdpvtp == NULL)
+	if ((cpcm = cpqary3_synccmd_alloc(cpqary3p, 0)) == NULL) {
 		return (CPQARY3_FAILURE);
+	}
 
-	cmdlistp = cpqary3_cmdpvtp->cmdlist_memaddr;
+	cmdlistp = cpcm->cpcm_va_cmd;
 
-	cmdlistp->Header.SGList = 0;
-	cmdlistp->Header.SGTotal = 0;
-	cmdlistp->Header.Tag.drvinfo_n_err = CPQARY3_SYNCCMD_SUCCESS;
 	cmdlistp->Header.LUN.PhysDev.TargetId = 0;
 	cmdlistp->Header.LUN.PhysDev.Bus = 0;
 	cmdlistp->Header.LUN.PhysDev.Mode = PERIPHERIAL_DEV_ADDR;
@@ -227,11 +200,9 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
 	cmdlistp->Request.CDBLen = CPQARY3_CDBLEN_16;
 	cmdlistp->Request.CDB[0] = CISS_MSG_ABORT;
 
-	if (cmdlist2abortp) { /* Abort this Particular Task */
+	if (cmdlist2abortp != NULL) { /* Abort this Particular Task */
 		cmdlistp->Request.CDB[1] = CISS_ABORT_TASK;
 		cpqary3_tagp = (cpqary3_tag_t *)&cmdlistp->Request.CDB[4];
-		cpqary3_tagp->drvinfo_n_err =
-		    cmdlist2abortp->Header.Tag.drvinfo_n_err;
 		cpqary3_tagp->tag_value = cmdlist2abortp->Header.Tag.tag_value;
 	} else { /* Abort all tasks for this Target */
 		cmdlistp->Request.CDB[1] = CISS_ABORT_TASKSET;
@@ -248,26 +219,21 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
 		}
 	}
 
-	/* PERF */
-
-	cpqary3_cmdpvtp->complete = cpqary3_synccmd_complete;
-
-	/* PERF */
+	cpcm->cpcm_complete = cpqary3_synccmd_complete;
 
 	/* BGB: CVFIX -> Introduced a call to cpqary3_synccmd_send */
-	if (cpqary3_synccmd_send(cpqary3p, cpqary3_cmdpvtp, 30000,
+	if (cpqary3_synccmd_send(cpqary3p, cpcm, 30000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
-		cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+		cpqary3_synccmd_free(cpqary3p, cpcm);
 		return (CPQARY3_FAILURE);
 	}
 
-	if (cpqary3_cmdpvtp->cmdlist_memaddr->Header.Tag.drvinfo_n_err ==
-	    CPQARY3_SYNCCMD_FAILURE) {
-		cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+	if (cmdlistp->Header.Tag.error != 0) {
+		cpqary3_synccmd_free(cpqary3p, cpcm);
 		return (CPQARY3_FAILURE);
 	}
 
-	cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+	cpqary3_synccmd_free(cpqary3p, cpcm);
 
 	return (CPQARY3_SUCCESS);
 
@@ -283,11 +249,11 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
  *			cpqary3_synccmd_free()
  * Return Values:	None
  */
-void
+int
 cpqary3_flush_cache(cpqary3_t *cpqary3p)
 {
-	CommandList_t		*cmdlistp;
-	cpqary3_cmdpvt_t	*cpqary3_cmdpvtp;
+	cpqary3_command_t *cpcm;
+	CommandList_t *cmdlistp;
 
 	/*
 	 * Occupy the Command List
@@ -299,15 +265,14 @@ cpqary3_flush_cache(cpqary3_t *cpqary3p)
 	ASSERT(cpqary3p != NULL);
 
 	/* grab a command and allocate a dma buffer */
-	cpqary3_cmdpvtp = cpqary3_synccmd_alloc(cpqary3p,
-	    sizeof (flushcache_buf_t));
-	if (cpqary3_cmdpvtp == NULL)
-		return;
+	if ((cpcm = cpqary3_synccmd_alloc(cpqary3p,
+	    sizeof (flushcache_buf_t))) == NULL) {
+		dev_err(cpqary3p->dip, CE_WARN, "flush cache failed: memory");
+		return (ENOMEM);
+	}
 
-	cmdlistp = cpqary3_cmdpvtp->cmdlist_memaddr;
-	cmdlistp->Header.SGList = 1;
-	cmdlistp->Header.SGTotal = 1;
-	cmdlistp->Header.Tag.drvinfo_n_err = CPQARY3_SYNCCMD_SUCCESS;
+	cmdlistp = cpcm->cpcm_va_cmd;
+
 	cmdlistp->Header.LUN.PhysDev.TargetId = 0;
 	cmdlistp->Header.LUN.PhysDev.Bus = 0;
 	cmdlistp->Header.LUN.PhysDev.Mode = PERIPHERIAL_DEV_ADDR;
@@ -321,21 +286,17 @@ cpqary3_flush_cache(cpqary3_t *cpqary3p)
 	cmdlistp->Request.CDB[6] = CISS_FLUSH_CACHE; /* 0xC2 */
 	cmdlistp->Request.CDB[8] = 0x02;
 
-	/* PERF */
+	cpcm->cpcm_complete = cpqary3_synccmd_complete;
 
-	cpqary3_cmdpvtp->complete = cpqary3_synccmd_complete;
-
-	/* PERF */
-
-	if (cpqary3_synccmd_send(cpqary3p, cpqary3_cmdpvtp, 90000,
+	if (cpqary3_synccmd_send(cpqary3p, cpcm, 90000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
-		cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
-		cmn_err(CE_WARN, "CPQary3  %s : Flush Cache Operation"
-		    "Failed, Timeout", cpqary3p->hba_name);
-		return;
+		dev_err(cpqary3p->dip, CE_WARN, "flush cache failed: timeout");
+		cpqary3_synccmd_free(cpqary3p, cpcm);
+		return (ETIMEDOUT);
 	}
 
-	cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+	cpqary3_synccmd_free(cpqary3p, cpcm);
+	return (0);
 }
 
 /*
@@ -359,7 +320,7 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 	uint32_t		data_addr_len;
 	rll_data_t		*rllp;
 	CommandList_t		*cmdlistp;
-	cpqary3_cmdpvt_t	*cpqary3_cmdpvtp;
+	cpqary3_command_t	*cpcm;
 
 	/*
 	 * Occupy the Command List
@@ -369,19 +330,14 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 	 * Submit and Poll for completion
 	 */
 
-	RETURN_FAILURE_IF_NULL(cpqary3p);
-
-	/* Sync Changes */
-	cpqary3_cmdpvtp = cpqary3_synccmd_alloc(cpqary3p, sizeof (rll_data_t));
-	if (cpqary3_cmdpvtp == NULL)
+	if ((cpcm = cpqary3_synccmd_alloc(cpqary3p,
+	    sizeof (rll_data_t))) == NULL) {
 		return (CPQARY3_FAILURE);
+	}
 
-	cmdlistp = cpqary3_cmdpvtp->cmdlist_memaddr;
-	rllp = (rll_data_t *)cpqary3_cmdpvtp->driverdata->sg;
+	cmdlistp = cpcm->cpcm_va_cmd;
+	rllp = cpcm->cpcm_internal->cpcmi_va;
 
-	cmdlistp->Header.SGList = 1;
-	cmdlistp->Header.SGTotal = 1;
-	cmdlistp->Header.Tag.drvinfo_n_err = CPQARY3_SYNCCMD_SUCCESS;
 	cmdlistp->Header.LUN.PhysDev.Mode = MASK_PERIPHERIAL_DEV_ADDR;
 
 	cmdlistp->Request.CDBLen = CPQARY3_CDBLEN_12;
@@ -399,30 +355,25 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 	cmdlistp->Request.CDB[9] = (data_addr_len) & 0xff;
 
 	DTRACE_PROBE2(rll_cmd_send, CommandList_t *, cmdlistp,
-	    cpqary3_cmdpvt_t *, cpqary3_cmdpvtp);
+	    cpqary3_cmdpvt_t *, cpcm);
 
-	/* PERF */
-	cpqary3_cmdpvtp->complete = cpqary3_synccmd_complete;
-	/* PERF */
+	cpcm->cpcm_complete = cpqary3_synccmd_complete;
 
-	if (cpqary3_synccmd_send(cpqary3p, cpqary3_cmdpvtp, 90000,
+	if (cpqary3_synccmd_send(cpqary3p, cpcm, 90000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
-		cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+		cpqary3_synccmd_free(cpqary3p, cpcm);
 		return (CPQARY3_FAILURE);
 	}
 
-	if ((cpqary3_cmdpvtp->cmdlist_memaddr->Header.Tag.drvinfo_n_err ==
-	    CPQARY3_SYNCCMD_FAILURE) &&
-	    (cpqary3_cmdpvtp->errorinfop->CommandStatus !=
-	    CISS_CMD_DATA_UNDERRUN)) {
-		cmn_err(CE_WARN, "CPQary3 : Probe for logical targets "
-		    "returned ERROR !");
+	if ((cmdlistp->Header.Tag.error != 0) &&
+	    (cpcm->cpcm_va_err->CommandStatus != CISS_CMD_DATA_UNDERRUN)) {
+		dev_err(cpqary3p->dip, CE_WARN, "probe for logical targets "
+		    "failed");
 		DTRACE_PROBE1(rll_cmd_fail,
-		    ErrorInfo_t *, cpqary3_cmdpvtp->errorinfop);
-		cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+		    ErrorInfo_t *, cpcm->cpcm_va_err);
+		cpqary3_synccmd_free(cpqary3p, cpcm);
 		return (CPQARY3_FAILURE);
 	}
-	/* Sync Changes */
 
 	log_lun_no = ((rllp->lunlist_byte0 + (rllp->lunlist_byte1 << 8) +
 	    (rllp->lunlist_byte2 << 16) + (rllp->lunlist_byte3 << 24)) / 8);
@@ -433,6 +384,7 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 	 * The following is to restrict the maximum number of supported logical
 	 * volumes to 32. This is very important as controller support upto 128
 	 * logical volumes and this driver implementation supports only 32.
+	 * XXX ... what?
 	 */
 
 	if (log_lun_no > MAX_LOGDRV) {
@@ -454,128 +406,81 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 
 
 	/*
-	 * Depending upon the value of the variable legacy_mapping set in
-	 * cpqary3_attach(),
-	 * the target mapping algorithm to be used by the driver is decided.
+	 * The Logical Drive numbers will not be renumbered in the case of
+	 * holes, and the mapping will be done as shown below:
 	 *
-	 * If the value of legacy_mapping is set to one, in the case of
-	 * Logical Drives with holes,
-	 * Targets will be renumbered by the driver as shown below
-	 * Below example makes the mapping logic clear.
-	 *
-	 * Logical Drive 0 in the HBA -> Target  ID 0 i.e., cXt0dXsx
-	 * Logical Drive 2 in the HBA ->  Target ID 1 i.e., cXt1dXsX
-	 * Logical Drive 3 in the HBA ->  Target ID 2 i.e., cXt2dXsX
-	 *
-	 * If the value of legacy_mapping is not one, then the Logical
-	 * Drive numbers will
-	 * not be renumbered in the case of holes, and the mapping
-	 * will be done as shown below
-	 * This will be the default mapping from 1.80 cpqary3 driver.
-	 *
-	 * Logical Drive 0  in the HBA -> Target ID 0 i.e. cXt0dXsx
+	 * Logical Drive 0 in the HBA ->  Target ID 0 i.e. cXt0dXsx
 	 * Logical Drive 2 in the HBA ->  Target ID 2 i.e. cXt2dXsX
 	 * Logical Drive 3 in the HBA ->  Target ID 3 i.e. cXt3dXsX
 	 */
 
+	/*
+	 * Fix for QXCR1000446657: Logical drives are re numbered after
+	 * deleting a Logical drive.
+	 * We are using new indexing mechanism to fill the
+	 * cpqary3_tgtp[],
+	 * Check given during memory allocation of cpqary3_tgtp
+	 * elements, so that memory is not re-allocated each time the
+	 * cpqary3_probe4LVs() is called.
+	 * Check given while freeing the memory of the cpqary3_tgtp[]
+	 * elements, when a hole is found in the Logical Drives
+	 * configured.
+	 */
 
-	if (cpqary3p->legacy_mapping == 1) {
-		for (cntr = 0; cntr < log_lun_no; cntr++) {
-			i = ((cntr < CTLR_SCSI_ID) ?
-			    cntr : cntr + CPQARY3_TGT_ALIGNMENT);
-			if (!(cpqary3p->cpqary3_tgtp[i] = (cpqary3_tgt_t *)
-			    MEM_ZALLOC(sizeof (cpqary3_tgt_t)))) {
-				cmn_err(CE_WARN, "CPQary3 : Failed to Detect "
-				    "targets, Memory Allocation Failure");
-				cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+	/* ensure that the loop will break for cntr = 32 in any case */
+	for (cntr = 0; ((ld_count < log_lun_no) && (cntr < MAX_LOGDRV));
+	    cntr++) {
+		i = ((cntr < CTLR_SCSI_ID) ?
+		    cntr : cntr + CPQARY3_TGT_ALIGNMENT);
+		lun_id = (rllp->ll_data[ld_count].logical_id & 0xFFFF);
+		if (cntr != lun_id) {
+			if (cpqary3p->cpqary3_tgtp[i]) {
+				kmem_free(cpqary3p->cpqary3_tgtp[i],
+				    sizeof (cpqary3_tgt_t));
+				cpqary3p->cpqary3_tgtp[i] = NULL;
+			}
+		} else {
+			if (cpqary3p->cpqary3_tgtp[i] == NULL &&
+			    !(cpqary3p->cpqary3_tgtp[i] =
+			    (cpqary3_tgt_t *)kmem_zalloc(
+			    sizeof (cpqary3_tgt_t), KM_NOSLEEP))) {
+				cmn_err(CE_WARN,
+				    "CPQary3 : Failed to Detect "
+				    "targets, Memory Allocation "
+				    "Failure");
+				/* Sync Changes */
+				cpqary3_synccmd_free(cpqary3p, cpcm);
+				/* Sync Changes */
 				return (CPQARY3_FAILURE);
 			}
-
 			cpqary3p->cpqary3_tgtp[i]->logical_id =
-			    rllp->ll_data[cntr].logical_id;
-
+			    rllp->ll_data[ld_count].logical_id;
 			cpqary3p->cpqary3_tgtp[i]->type =
 			    CPQARY3_TARGET_LOG_VOL;
 
-			DTRACE_PROBE2(lvlun_remapped,
-			    cpqary3_tgt_t *, cpqary3p->cpqary3_tgtp[i],
-			    rpl_data_t *, &rllp->ll_data[cntr]);
+			/*
+			 * Send "BMIC sense logical drive status
+			 * command to set the target type to
+			 * CPQARY3_TARGET_NONE in case of logical
+			 * drive failure
+			 */
+
+			ld_count++;
 		}
-	} else {
-		/*
-		 * Fix for QXCR1000446657: Logical drives are re numbered after
-		 * deleting a Logical drive.
-		 * We are using new indexing mechanism to fill the
-		 * cpqary3_tgtp[],
-		 * Check given during memory allocation of cpqary3_tgtp
-		 * elements, so that memory is not re-allocated each time the
-		 * cpqary3_probe4LVs() is called.
-		 * Check given while freeing the memory of the cpqary3_tgtp[]
-		 * elements, when a hole is found in the Logical Drives
-		 * configured.
-		 */
-
-		/* ensure that the loop will break for cntr = 32 in any case */
-		for (cntr = 0; ((ld_count < log_lun_no) && (cntr < MAX_LOGDRV));
-		    cntr++) {
-			i = ((cntr < CTLR_SCSI_ID) ?
-			    cntr : cntr + CPQARY3_TGT_ALIGNMENT);
-			lun_id = (rllp->ll_data[ld_count].logical_id & 0xFFFF);
-			if (cntr != lun_id) {
-				if (cpqary3p->cpqary3_tgtp[i]) {
-					MEM_SFREE(cpqary3p->cpqary3_tgtp[i],
-					    sizeof (cpqary3_tgt_t));
-					cpqary3p->cpqary3_tgtp[i] = NULL;
-				}
-			} else {
-				if (cpqary3p->cpqary3_tgtp[i] == NULL &&
-				    !(cpqary3p->cpqary3_tgtp[i] =
-				    (cpqary3_tgt_t *)MEM_ZALLOC(
-				    sizeof (cpqary3_tgt_t)))) {
-					cmn_err(CE_WARN,
-					    "CPQary3 : Failed to Detect "
-					    "targets, Memory Allocation "
-					    "Failure");
-					/* Sync Changes */
-					cpqary3_synccmd_free(cpqary3p,
-					    cpqary3_cmdpvtp);
-					/* Sync Changes */
-					return (CPQARY3_FAILURE);
-				}
-				cpqary3p->cpqary3_tgtp[i]->logical_id =
-				    rllp->ll_data[ld_count].logical_id;
-				cpqary3p->cpqary3_tgtp[i]->type =
-				    CPQARY3_TARGET_LOG_VOL;
-
-				/*
-				 * Send "BMIC sense logical drive status
-				 * command to set the target type to
-				 * CPQARY3_TARGET_NONE in case of logical
-				 * drive failure
-				 */
-
-				ld_count++;
-			}
-		}
-
 	}
 
-	/* HPQacucli Changes */
 	for (; cntr < MAX_LOGDRV; cntr++) {
 		cpqary3_tgt_t *t;
 		i = ((cntr < CTLR_SCSI_ID) ?
 		    cntr : cntr + CPQARY3_TGT_ALIGNMENT);
 		t = cpqary3p->cpqary3_tgtp[i];
 		cpqary3p->cpqary3_tgtp[i] = NULL;
-		if (t) {
-			MEM_SFREE(t, sizeof (*t));
+		if (t != NULL) {
+			kmem_free(t, sizeof (*t));
 		}
 	}
-	/* HPQacucli Changes */
 
-	/* Sync Changes */
-	cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
-	/* Sync Changes */
+	cpqary3_synccmd_free(cpqary3p, cpcm);
 
 	return (CPQARY3_SUCCESS);
 }
@@ -599,7 +504,7 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	uint32_t		data_addr_len;
 	rpl_data_t		*rplp;
 	CommandList_t		*cmdlistp;
-	cpqary3_cmdpvt_t	*cpqary3_cmdpvtp;
+	cpqary3_command_t	*cpcm;
 
 	/*
 	 * Occupy the Command List
@@ -609,21 +514,16 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	 * Submit and Poll for completion
 	 */
 
-	RETURN_FAILURE_IF_NULL(cpqary3p);
-
-	/* Sync Changes */
-	cpqary3_cmdpvtp = cpqary3_synccmd_alloc(cpqary3p, sizeof (rpl_data_t));
-	if (cpqary3_cmdpvtp == NULL)
+	if ((cpcm = cpqary3_synccmd_alloc(cpqary3p, sizeof (rpl_data_t))) ==
+	    NULL) {
 		return (CPQARY3_FAILURE);
+	};
 
-	cmdlistp = cpqary3_cmdpvtp->cmdlist_memaddr;
-	rplp = (rpl_data_t *)cpqary3_cmdpvtp->driverdata->sg;
+	cmdlistp = cpcm->cpcm_va_cmd;
+	rplp = cpcm->cpcm_internal->cpcmi_va;
 
 	/* Sync Changes */
 
-	cmdlistp->Header.SGList = 1;
-	cmdlistp->Header.SGTotal = 1;
-	cmdlistp->Header.Tag.drvinfo_n_err = CPQARY3_SYNCCMD_SUCCESS;
 	cmdlistp->Header.LUN.PhysDev.TargetId = 0;
 	cmdlistp->Header.LUN.PhysDev.Bus = 0;
 	cmdlistp->Header.LUN.PhysDev.Mode = MASK_PERIPHERIAL_DEV_ADDR;
@@ -643,32 +543,25 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	cmdlistp->Request.CDB[9] = (data_addr_len) & 0xff;
 
 	DTRACE_PROBE2(tape_probe_cmd_send,
-	    CommandList_t *, cmdlistp, cpqary3_cmdpvt_t *, cpqary3_cmdpvtp);
+	    CommandList_t *, cmdlistp, cpqary3_command_t *, cpcm);
 
-	/* PERF */
-	cpqary3_cmdpvtp->complete = cpqary3_synccmd_complete;
-	/* PERF */
+	cpcm->cpcm_complete = cpqary3_synccmd_complete;
 
-	/* Sync Changes */
-
-	if (cpqary3_synccmd_send(cpqary3p, cpqary3_cmdpvtp, 90000,
+	if (cpqary3_synccmd_send(cpqary3p, cpcm, 90000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
-		cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+		cpqary3_synccmd_free(cpqary3p, cpcm);
 		return (CPQARY3_FAILURE);
 	}
 
-	if ((cpqary3_cmdpvtp->cmdlist_memaddr->Header.Tag.drvinfo_n_err ==
-	    CPQARY3_SYNCCMD_FAILURE) &&
-	    (cpqary3_cmdpvtp->errorinfop->CommandStatus !=
-	    CISS_CMD_DATA_UNDERRUN)) {
+	if ((cmdlistp->Header.Tag.error != 0) &&
+	    (cpcm->cpcm_va_err->CommandStatus != CISS_CMD_DATA_UNDERRUN)) {
 		cmn_err(CE_WARN, "CPQary3 : Probe for physical targets "
 		    "returned ERROR !");
 		DTRACE_PROBE1(tape_probe_cmdfail,
-		    ErrorInfo_t *, cpqary3_cmdpvtp->errorinfop);
-		cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
+		    ErrorInfo_t *, cpcm->cpcm_va_err);
+		cpqary3_synccmd_free(cpqary3p, cpcm);
 		return (CPQARY3_FAILURE);
 	}
-	/* Sync Changes */
 
 	phy_lun_no = ((rplp->lunlist_byte0 +
 	    (rplp->lunlist_byte1 << 8) +
@@ -693,7 +586,6 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	 * if the controller is SAS or CISS and then assigning the value of the
 	 * TAPE BASE accordingly
 	 */
-
 	if (cpqary3p->bddef->bd_flags & SA_BD_SAS) {
 		ii = 0x41;	/* MAX_LOGDRV + 1 - 64 + 1 */
 	} else {
@@ -705,11 +597,10 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 			if (cpqary3p->cpqary3_tgtp[ii] == NULL &&
 			    !(cpqary3p->cpqary3_tgtp[ii] =
 			    (cpqary3_tgt_t *)
-			    MEM_ZALLOC(sizeof (cpqary3_tgt_t)))) {
+			    kmem_zalloc(sizeof (cpqary3_tgt_t), KM_NOSLEEP))) {
 				cmn_err(CE_WARN, "CPQary3 : Failed to Detect "
 				    "targets, Memory Allocation Failure");
-				cpqary3_synccmd_free(cpqary3p,
-				    cpqary3_cmdpvtp);
+				cpqary3_synccmd_free(cpqary3p, cpcm);
 				return (CPQARY3_FAILURE);
 			}
 
@@ -726,9 +617,7 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 		}
 	}
 
-	/* Sync Changes */
-	cpqary3_synccmd_free(cpqary3p, cpqary3_cmdpvtp);
-	/* Sync Changes */
+	cpqary3_synccmd_free(cpqary3p, cpcm);
 
 	return (CPQARY3_SUCCESS);
 
@@ -745,30 +634,36 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
  * Return Values:    None
  */
 void
-cpqary3_synccmd_complete(cpqary3_cmdpvt_t *cpqary3_cmdpvtp)
+cpqary3_synccmd_complete(cpqary3_command_t *cpcm)
 {
-	cpqary3_t	*cpqary3p;
+	cpqary3_t *cpq = cpcm->cpcm_ctlr;
 
-	ASSERT(cpqary3_cmdpvtp != NULL);
+	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
 
+	/*
+	 * XXX This flag is set by the periodic function which we have
+	 * disabled for now...
+	 */
+#if 0
 	if (CPQARY3_TIMEOUT == cpqary3_cmdpvtp->cmdpvt_flag) {
 		cpqary3_cmdlist_release(cpqary3_cmdpvtp, CPQARY3_NO_MUTEX);
 		return;
 	}
+#endif
 
-	cpqary3p = cpqary3_cmdpvtp->ctlr;
-
-	if (cpqary3_cmdpvtp->cmdpvt_flag == CPQARY3_SYNC_TIMEOUT) {
+	switch (cpcm->cpcm_synccmd_status) {
+	case CPQARY3_SYNCCMD_STATUS_TIMEOUT:
 		/*
 		 * The submitter has abandoned this command, so we
 		 * have to free the resources here.
 		 */
-		mutex_exit(&(cpqary3p->sw_mutex));
-		cpqary3_synccmd_cleanup(cpqary3_cmdpvtp);
-		mutex_enter(&(cpqary3p->sw_mutex));
-	} else {
-		/* submitter is waiting; wake him up */
-		cpqary3_cmdpvtp->cmdpvt_flag = 0;
+		mutex_exit(&cpq->sw_mutex);
+		cpqary3_command_free(cpcm);
+		mutex_enter(&cpq->sw_mutex);
+		return;
+
+	case CPQARY3_SYNCCMD_STATUS_SUBMITTED:
+		cpcm->cpcm_synccmd_status = CPQARY3_SYNCCMD_STATUS_NONE;
 
 		/*
 		 * Fix for Flush Cache Operation Timed out issue:
@@ -776,6 +671,13 @@ cpqary3_synccmd_complete(cpqary3_cmdpvt_t *cpqary3_cmdpvtp)
 		 * We need to use cv_broadcast which unblocks
 		 * all the blocked threads()
 		 */
-		cv_broadcast(&(cpqary3p->cv_ioctl_wait));
+		cv_broadcast(&cpq->cv_ioctl_wait);
+		return;
+
+	case CPQARY3_SYNCCMD_STATUS_NONE:
+		panic("synccmd completed but status is NONE");
+		break;
 	}
+
+	panic("unknown synccmd status");
 }

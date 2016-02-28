@@ -30,7 +30,6 @@
 uint8_t cpqary3_check_simple_ctlr_intr(cpqary3_t *cpqary3p);
 uint8_t cpqary3_check_perf_ctlr_intr(cpqary3_t *cpqary3p);
 uint8_t cpqary3_check_perf_e200_intr(cpqary3_t *cpqary3p);
-uint8_t cpqary3_check_ctlr_init(cpqary3_t *);
 
 /*
  * Function	: 	cpqary3_check_simple_ctlr_intr
@@ -112,80 +111,105 @@ cpqary3_check_perf_e200_intr(cpqary3_t *cpqary3p)
 	return (CPQARY3_FAILURE);
 }
 
-
 /*
- * Function	: 	cpqary3_retrieve
- * Description	: 	This routine retrieves the completed command from the
- *			controller reply queue.
- *			and processes the completed commands.
- * Called By	:  	cpqary3_sw_isr(), cpqary3_handle_flag_nointr()
- * Parameters	: 	per-controller
- * Calls	: 	packet completion routines
- * Return Values: 	SUCCESS : A completed command has been retrieved
- *			and processed.
- *			FAILURE : No completed command was in the controller.
+ * Read tags and process completion of the associated command until the supply
+ * of tags is exhausted.
  */
-uint8_t
-cpqary3_retrieve(cpqary3_t *cpqary3p)
+void
+cpqary3_retrieve_simple(cpqary3_t *cpq, uint32_t watchfor, boolean_t *found)
 {
-	uint32_t			tag;
-	uint32_t			CmdsOutMax;
-	cpqary3_cmdpvt_t		*cpqary3_cmdpvtp;
-	cpqary3_drvr_replyq_t		*replyq_ptr;
+	uint32_t opq;
 
-	/*
-	 * Get the Reply Command List Addr
-	 * Update the returned Tag in that particular command structure.
-	 * If a valid one, de-q that from the SUBMITTED Q and
-	 * enqueue that to the RETRIEVED Q.
-	 */
+	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
 
-	RETURN_FAILURE_IF_NULL(cpqary3p);
+	while ((opq = ddi_get32(cpq->opq_handle, cpq->opq)) != 0xffffffff) {
+		cpqary3_command_t *cpcm;
+		uint32_t tag = opq >> 2; /* XXX */
 
-	/* PERF */
-	replyq_ptr = (cpqary3_drvr_replyq_t *)cpqary3p->drvr_replyq;
-	CmdsOutMax = cpqary3p->ctlr_maxcmds;
-
-	while ((replyq_ptr->replyq_headptr[0] & 0x01) ==
-	    replyq_ptr->cyclic_indicator) {
-		/* command has completed */
-		/* Get the tag */
-
-		tag = replyq_ptr->replyq_headptr[0];
-		if ((tag >> CPQARY3_GET_MEM_TAG) >= (CmdsOutMax / 3) * 3) {
-			cmn_err(CE_WARN,
-			    "CPQary3 : HBA returned Spurious Tag");
-			return (CPQARY3_FAILURE);
+		if ((cpcm = cpqary3_lookup_inflight(cpq, tag)) == NULL) {
+			dev_err(cpq->dip, CE_WARN, "spurious tag %x", tag);
+			continue;
 		}
 
-		cpqary3_cmdpvtp = &cpqary3p->cmdmemlistp->pool[
-		    tag >> CPQARY3_GET_MEM_TAG];
-		cpqary3_cmdpvtp->cmdlist_memaddr->
-		    Header.Tag.drvinfo_n_err = (tag & 0xF) >> 1;
-		mutex_enter(&cpqary3p->sw_mutex);
-		cpqary3_cmdpvtp->complete(cpqary3_cmdpvtp);
-		mutex_exit(&cpqary3p->sw_mutex);
+		avl_remove(&cpq->cpq_inflight, cpcm);
+		cpcm->cpcm_inflight = B_FALSE;
+		cpcm->cpcm_error = (opq & (0x1 << 1)) != 0;
 
-		/* Traverse to the next command in reply queue */
-
-		++replyq_ptr->index;
-		if (replyq_ptr->index == replyq_ptr->max_index) {
-			replyq_ptr->index = 0;
-			/* Toggle at wraparound */
-			replyq_ptr->cyclic_indicator =
-			    (replyq_ptr->cyclic_indicator == 0) ? 1 : 0;
-			replyq_ptr->replyq_headptr =
-			    /* LINTED: alignment */
-			    (uint32_t *)(replyq_ptr->replyq_start_addr);
-		} else {
-			replyq_ptr->replyq_headptr += 2;
+		if (found != NULL && cpcm->cpcm_tag == watchfor) {
+			*found = B_TRUE;
 		}
+
+		mutex_exit(&cpq->hw_mutex);
+		cpcm->cpcm_complete(cpcm);
+		mutex_enter(&cpq->hw_mutex);
 	}
-	/* PERF */
-
-	return (CPQARY3_SUCCESS);
 }
 
+void
+cpqary3_retrieve_performant(cpqary3_t *cpq, uint32_t watchfor, boolean_t *found)
+{
+	cpqary3_replyq_t *cprq = &cpq->cpq_replyq;
+
+	for (;;) {
+		uint32_t ent = cprq->cprq_tags[2 * cprq->cprq_read_index];
+		uint32_t tag = ent >> 2; /* XXX */
+		cpqary3_command_t *cpcm;
+
+		if ((ent & 0x1) != cprq->cprq_cycle_indicator) {
+			break;
+		}
+
+		if ((cpcm = cpqary3_lookup_inflight(cpq, tag)) == NULL) {
+			dev_err(cpq->dip, CE_WARN, "spurious tag %x", tag);
+			continue;
+		}
+
+		avl_remove(&cpq->cpq_inflight, cpcm);
+		cpcm->cpcm_inflight = B_FALSE;
+		cpcm->cpcm_error = (ent & (0x1 << 1)) != 0;
+
+		if (found != NULL && cpcm->cpcm_tag == watchfor) {
+			*found = B_TRUE;
+		}
+
+		cpcm->cpcm_complete(cpcm);
+
+		if (++cprq->cprq_read_index >= cprq->cprq_ntags) {
+			cprq->cprq_read_index = 0;
+			if (cprq->cprq_cycle_indicator == 1) {
+				cprq->cprq_cycle_indicator = 0;
+			} else {
+				cprq->cprq_cycle_indicator = 1;
+			}
+		}
+	}
+}
+
+/*
+ * XXX
+ */
+int
+cpqary3_retrieve(cpqary3_t *cpq)
+{
+	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
+
+	switch (cpq->cpq_ctlr_mode) {
+	case CPQARY3_CTLR_MODE_SIMPLE:
+		cpqary3_retrieve_simple(cpq, 0, NULL);
+		return (CPQARY3_SUCCESS);
+
+	case CPQARY3_CTLR_MODE_PERFORMANT:
+		cpqary3_retrieve_performant(cpq, 0, NULL);
+		return (CPQARY3_SUCCESS);
+
+	case CPQARY3_CTLR_MODE_UNKNOWN:
+		break;
+	}
+
+	panic("unknown controller mode");
+}
 
 /*
  * Function	:  cpqary3_poll_retrieve
@@ -199,79 +223,27 @@ cpqary3_retrieve(cpqary3_t *cpqary3p)
  *			If not return failure.
  */
 uint8_t
-cpqary3_poll_retrieve(cpqary3_t *cpqary3p, uint32_t poll_tag)
+cpqary3_poll_retrieve(cpqary3_t *cpq, uint32_t poll_tag)
 {
-	uint32_t			tag;
-	uint32_t			CmdsOutMax;
-	cpqary3_cmdpvt_t		*cpqary3_cmdpvtp;
-	cpqary3_drvr_replyq_t		*replyq_ptr;
-	uint32_t			temp_tag;
-	uint8_t				tag_flag = 0;
+	boolean_t found = B_FALSE;
 
-	RETURN_FAILURE_IF_NULL(cpqary3p);
+	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
 
-	/* PERF */
-	replyq_ptr = (cpqary3_drvr_replyq_t *)cpqary3p->drvr_replyq;
-	CmdsOutMax = cpqary3p->cmdmemlistp->max_memcnt;
+	switch (cpq->cpq_ctlr_mode) {
+	case CPQARY3_CTLR_MODE_SIMPLE:
+		cpqary3_retrieve_simple(cpq, poll_tag, &found);
+		break;
 
-	if (!(cpqary3p->bddef->bd_flags & SA_BD_SAS)) {
-		while ((tag = ddi_get32(cpqary3p->opq_handle,
-		    (uint32_t *)cpqary3p->opq)) != 0xFFFFFFFF) {
-			cpqary3_cmdpvtp = &cpqary3p->cmdmemlistp->pool[
-			    tag >> CPQARY3_GET_MEM_TAG];
-			cpqary3_cmdpvtp->cmdlist_memaddr->
-			    Header.Tag.drvinfo_n_err = (tag & 0xF) >> 1;
-			temp_tag = cpqary3_cmdpvtp->tag.tag_value;
+	case CPQARY3_CTLR_MODE_PERFORMANT:
+		cpqary3_retrieve_performant(cpq, poll_tag, &found);
+		break;
 
-			if (temp_tag == poll_tag)
-				tag_flag = 1;
-			cpqary3_cmdpvtp->complete(cpqary3_cmdpvtp);
-		}
-	} else {
-		while ((replyq_ptr->replyq_headptr[0] & 0x01) ==
-		    replyq_ptr->cyclic_indicator) {
-			/* command has completed */
-			/* Get the tag */
-			tag = replyq_ptr->replyq_headptr[0];
-
-			if ((tag >> CPQARY3_GET_MEM_TAG) >= (CmdsOutMax/3)*3) {
-				cmn_err(CE_WARN,
-				    "CPQary3 : HBA returned Spurious Tag");
-				return (CPQARY3_FAILURE);
-			}
-
-			cpqary3_cmdpvtp = &cpqary3p->cmdmemlistp->pool[
-			    tag >> CPQARY3_GET_MEM_TAG];
-			cpqary3_cmdpvtp->cmdlist_memaddr->
-			    Header.Tag.drvinfo_n_err = (tag & 0xF) >> 1;
-			temp_tag = cpqary3_cmdpvtp->tag.tag_value;
-
-			if (temp_tag == poll_tag)
-				tag_flag = 1;
-
-			cpqary3_cmdpvtp->complete(cpqary3_cmdpvtp);
-
-			/* Traverse to the next command in reply queue */
-			++replyq_ptr->index;
-			if (replyq_ptr->index == replyq_ptr->max_index) {
-				replyq_ptr->index = 0;
-				/* Toggle at wraparound */
-				replyq_ptr->cyclic_indicator =
-				    (replyq_ptr->cyclic_indicator == 0) ? 1 : 0;
-				replyq_ptr->replyq_headptr =
-				    /* LINTED: alignment */
-				    (uint32_t *)(replyq_ptr->replyq_start_addr);
-			} else {
-				replyq_ptr->replyq_headptr += 2;
-			}
-		}
-	}
-	/* PERF */
-	if (tag_flag) {
-		return (CPQARY3_SUCCESS);
+	default:
+		panic("unknown controller mode");
 	}
 
-	return (CPQARY3_FAILURE);
+	return (found ? CPQARY3_SUCCESS : CPQARY3_FAILURE);
 }
 
 /*
@@ -286,38 +258,59 @@ cpqary3_poll_retrieve(cpqary3_t *cpqary3p, uint32_t poll_tag)
  * Return Values: 	None
  */
 int
-cpqary3_submit(cpqary3_t *cpqary3p, uint32_t cmd_phyaddr)
+cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 {
-	ASSERT(cpqary3p != NULL);
-	ASSERT(MUTEX_HELD(&cpqary3p->hw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
 
 	/*
 	 * If a controller lockup has been detected, reject new command
 	 * submissions.
 	 */
-	if (cpqary3p->controller_lockup == CPQARY3_TRUE) {
+	if (cpq->controller_lockup == CPQARY3_TRUE) {
 		return (EIO);
 	}
 
 	/*
-	 * Write the Physical Address of the command-to-be-submitted
-	 * into the Controller's Inbound Post Q.
+	 * XXX
+	 * At present, we have no good way to "re-use" an allocated
+	 * command structure.  Let's catch any places where this happens.
 	 */
-	if (!(cpqary3p->bddef->bd_flags & SA_BD_SAS)) {
-		ddi_put32(cpqary3p->ipq_handle, cpqary3p->ipq, cmd_phyaddr);
-	} else {
-		/* The driver always uses the 0th block fetch count always */
-		uint32_t phys_addr = cmd_phyaddr | 0 | 0x1;
-
-		ddi_put32(cpqary3p->ipq_handle, cpqary3p->ipq, phys_addr);
-	}
+	VERIFY(!cpcm->cpcm_used);
+	cpcm->cpcm_used = B_TRUE;
 
 	/*
-	 * Command submission can NEVER FAIL since the number of commands that
-	 * can reside in the controller at any time is 1024 and our memory
-	 * allocation is for 225 commands ONLY. Thus, at any given time the
-	 * maximum number of commands in the controller is 225.
+	 * Insert this command into the inflight AVL.
 	 */
+	avl_index_t where;
+	if (avl_find(&cpq->cpq_inflight, cpcm, &where) != NULL) {
+		dev_err(cpq->dip, CE_PANIC, "duplicate submit tag %x",
+		    cpcm->cpcm_tag);
+	}
+	avl_insert(&cpq->cpq_inflight, cpcm, where);
+
+	VERIFY(cpcm->cpcm_inflight == B_FALSE);
+	cpcm->cpcm_inflight = B_TRUE;
+
+	switch (cpq->cpq_ctlr_mode) {
+	case CPQARY3_CTLR_MODE_SIMPLE:
+		ddi_put32(cpq->ipq_handle, cpq->ipq, cpcm->cpcm_pa_cmd);
+		break;
+
+	case CPQARY3_CTLR_MODE_PERFORMANT:
+		/*
+		 * XXX The driver always uses the 0th block fetch count always
+		 *
+		 * (NB: from spec, the 0x1 here sets "pull from host memory"
+		 * mode, and the 0 represents "pull just one command record"
+		 */
+		ddi_put32(cpq->ipq_handle, cpq->ipq,
+		    cpcm->cpcm_pa_cmd | 0 | 0x1);
+		break;
+
+	default:
+		panic("unknown controller mode");
+	}
+
 	return (0);
 }
 
@@ -332,25 +325,34 @@ cpqary3_submit(cpqary3_t *cpqary3p, uint32_t cmd_phyaddr)
  * Return Values: 	None
  */
 void
-cpqary3_intr_onoff(cpqary3_t *cpqary3p, uint8_t flag)
+cpqary3_intr_onoff(cpqary3_t *cpq, uint8_t flag)
 {
 	/*
 	 * Read the Interrupt Mask Register.
 	 */
-	uint32_t imr = ddi_get32(cpqary3p->imr_handle, cpqary3p->imr);
+	uint32_t imr = ddi_get32(cpq->imr_handle, cpq->imr);
 
-	/*
-	 * Enable or disable interrupts from the controller based on the flag.
-	 */
-	if (flag == CPQARY3_INTR_ENABLE) {
-		imr &= ~cpqary3p->bddef->bd_intrmask;
-	} else {
-		VERIFY(flag == CPQARY3_INTR_DISABLE);
+	VERIFY(flag == CPQARY3_INTR_ENABLE || flag == CPQARY3_INTR_DISABLE);
 
-		imr |= cpqary3p->bddef->bd_intrmask;
+	switch (cpq->cpq_ctlr_mode) {
+	case CPQARY3_CTLR_MODE_SIMPLE:
+		if (flag == CPQARY3_INTR_ENABLE) {
+			imr &= ~INTR_SIMPLE_MASK;
+		} else {
+			imr |= INTR_SIMPLE_MASK;
+		}
+		break;
+
+	default:
+		if (flag == CPQARY3_INTR_ENABLE) {
+			imr &= ~cpq->bddef->bd_intrmask;
+		} else {
+			imr |= cpq->bddef->bd_intrmask;
+		}
+		break;
 	}
 
-	ddi_put32(cpqary3p->imr_handle, cpqary3p->imr, imr);
+	ddi_put32(cpq->imr_handle, cpq->imr, imr);
 }
 
 /*
@@ -501,24 +503,272 @@ cpqary3_cfgtbl_transport_confirm(cpqary3_t *cpqary3p, int xport)
 	return (CPQARY3_SUCCESS);
 }
 
+uint32_t
+cpqary3_ctlr_get_cmdsoutmax(cpqary3_t *cpq)
+{
+	uint32_t val;
+
+	if (cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_PERFORMANT) {
+		if ((val = ddi_get32(cpq->ct_handle,
+		    &cpq->ct->MaxPerfModeCmdsOutMax)) != 0) {
+			return (val);
+		}
+	}
+
+	return (ddi_get32(cpq->ct_handle, &cpq->ct->CmdsOutMax));
+}
+
+uint32_t
+cpqary3_ctlr_get_hostdrvsup(cpqary3_t *cpq)
+{
+	if ((!cpq->bddef->bd_is_e200) && (!cpq->bddef->bd_is_ssll)) {
+		uint32_t val = ddi_get32(cpq->ct_handle,
+		    &cpq->ct->HostDrvrSupport);
+
+		/*
+		 * XXX This is "bit 2" in the "Host Driver Specific Support"
+		 * field of the Configuration Table.  According to the CISS
+		 * spec, this is "Interrupt Host upon Controller Lockup"
+		 * Enable.
+		 *
+		 * It's not clear why we _set_ this bit, but then it's not yet
+		 * clear how this table entry is even supposed to work.
+		 */
+		val |= 0x04;
+
+		ddi_put32(cpq->ct_handle, &cpq->ct->HostDrvrSupport, val);
+	}
+
+	return (ddi_get32(cpq->ct_handle, &cpq->ct->HostDrvrSupport));
+}
+
+int
+cpqary3_ctlr_init_simple(cpqary3_t *cpq)
+{
+	VERIFY(cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_UNKNOWN);
+
+	if (cpqary3_cfgtbl_transport_has_support(cpq,
+	    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
+		return (ENOTTY);
+	}
+	cpq->cpq_ctlr_mode = CPQARY3_CTLR_MODE_SIMPLE;
+
+	if ((cpq->ctlr_maxcmds = cpqary3_ctlr_get_cmdsoutmax(cpq)) == 0) {
+		dev_err(cpq->dip, CE_WARN, "maximum outstanding commands set "
+		    "to zero");
+		return (EPROTO);
+	}
+
+	cpq->sg_cnt = CPQARY3_SG_CNT;
+
+	/*
+	 * Set the Transport Method and flush the changes to the
+	 * Configuration Table.
+	 */
+	cpqary3_cfgtbl_transport_set(cpq, CISS_CFGTBL_XPORT_SIMPLE);
+	if (cpqary3_cfgtbl_flush(cpq) != CPQARY3_SUCCESS) {
+		return (EPROTO);
+	}
+
+	if (cpqary3_cfgtbl_transport_confirm(cpq,
+	    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
+		return (EPROTO);
+	}
+
+	/*
+	 * XXX It's not clear why we check this a second time, but the original
+	 * driver did.
+	 */
+	uint32_t check_again = cpqary3_ctlr_get_cmdsoutmax(cpq);
+	if (check_again != cpq->ctlr_maxcmds) {
+		dev_err(cpq->dip, CE_WARN, "maximum outstanding commands "
+		    "changed during initialisation (was %u, now %u)",
+		    cpq->ctlr_maxcmds, check_again);
+		return (EPROTO);
+	}
+
+	/*
+	 * Zero the upper 32 bits of the address in the Controller.
+	 */
+	ddi_put32(cpq->ct_handle, &cpq->ct->HostWrite.Upper32Addr, 0);
+
+	/*
+	 * Set the controller interrupt check routine.
+	 */
+	cpq->check_ctlr_intr = cpqary3_check_simple_ctlr_intr;
+
+	cpq->host_support = cpqary3_ctlr_get_hostdrvsup(cpq);
+
+	return (0);
+}
+
 /*
- * Function	: 	cpqary3_init_ctlr
- * Description	: 	This routine initialises the HBA to Simple Transport
- *			Method. Refer to CISS for more information.
- *			It checks the readiness of the HBA.
- * Called By	: 	cpqary3_init_ctlr_resource()
- * Parameters	: 	per-controller(), physical address()
- * Calls	: 	cpqary3_check_ctlr_init
- * Return Values: 	SUCCESS / FAILURE
- *			[Shall return failure if the initialization of the
- *			controller to the Simple Transport Method fails]
+ * XXX
  */
-uint8_t
-cpqary3_init_ctlr(cpqary3_t *cpqary3p)
+#if 0
+int
+cpqary3_ctlr_init_performant(cpqary3_t *cpq)
+{
+	cpqary3_replyq_t *cprq = &cpq->cpq_replyq;
+
+	VERIFY(cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_UNKNOWN);
+
+	if (cpqary3_cfgtbl_transport_has_support(cpq,
+	    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
+		return (ENOTTY);
+	}
+	cpq->cpq_ctlr_mode = CPQARY3_CTLR_MODE_PERFORMANT;
+
+	if ((cpq->ctlr_maxcmds = cpqary3_ctlr_get_cmdsoutmax(cpq)) == 0) {
+		dev_err(cpq->dip, CE_WARN, "maximum outstanding commands set "
+		    "to zero");
+		return (EPROTO);
+	}
+
+	/*
+	 * Initialize the Performant Method Transport Method Table.
+	 *
+	 * XXX "Number of 4-byte nodes in each reply queue. Same for all reply
+	 * queues."  Here we are passing the number of COMMANDS, which is the
+	 * number of 8-byte nodes...
+	 */
+	DDI_PUT32_CP(cpq, &cpq->cp->ReplyQSize, cpq->ctlr_maxcmds);
+	DDI_PUT32_CP(cpq, &cpq->cp->ReplyQCount, 1);
+	DDI_PUT32_CP(cpq, &cpq->cp->ReplyQCntrAddrLow32, 0);
+	DDI_PUT32_CP(cpq, &cpq->cp->ReplyQCntrAddrHigh32, 0);
+
+	/*
+	 * Each slot in the Reply Queue consists of two 4 byte integer
+	 * fields.
+	 */
+	size_t qsize = cpq->ctlr_maxcmds * 2 * sizeof (uint32_t);
+
+	if ((cprq->cprq_tags = (void *)cpqary3_alloc_phyctgs_mem(cpq, qsize,
+	    &cprq->cprq_tags_pa, &cprq->cprq_phyctg)) == NULL) {
+		dev_err(cpq->dip, CE_WARN, "could not allocate replyq");
+		return (ENOMEM);
+	}
+
+	bzero(cprq->cprq_tags, qsize);
+	cprq->cprq_ntags = cpq->ctlr_maxcmds;
+	cprq->cprq_cycle_indicator = 1;
+	cprq->cprq_read_index = 0;
+
+	DDI_PUT32_CP(cpq, &cpq->cp->ReplyQAddr0Low32, cprq->cprq_tags_pa);
+	DDI_PUT32_CP(cpq, &cpq->cp->ReplyQAddr0High32, 0);
+
+	max_blk_fetch_cnt = DDI_GET32(cpq, &ctp->MaxBlockFetchCount);
+
+	/*
+	 * For non-proton FW controllers, max_blk_fetch_count is not
+	 * implemented in the firmware
+	 */
+
+	/*
+	 * When blk fetch count is 0, FW auto fetches 564 bytes
+	 * corresponding to an optimal S/G of 31
+	 */
+	if (max_blk_fetch_cnt == 0) {
+		BlockFetchCnt[0] = 35;
+	} else {
+		/*
+		 * With MAX_PERF_SG_CNT set to 64, block fetch count
+		 * is got by:(sizeof (CommandList_t) + 15)/16
+		 */
+		if (max_blk_fetch_cnt > 68)
+			BlockFetchCnt[0] = 68;
+		else
+			BlockFetchCnt[0] = max_blk_fetch_cnt;
+	}
+
+	DDI_PUT32_CP(cpq, &perf_cfg->BlockFetchCnt[0], BlockFetchCnt[0]);
+
+	/*
+	 * Set the Transport Method and flush the changes to the
+	 * Configuration Table.
+	 */
+	cpqary3_cfgtbl_transport_set(cpq, CISS_CFGTBL_XPORT_PERFORMANT);
+	if (cpqary3_cfgtbl_flush(cpq) != CPQARY3_SUCCESS) {
+		return (EPROTO);
+	}
+
+	if (cpqary3_cfgtbl_transport_confirm(cpq,
+	    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
+		return (EPROTO);
+	}
+
+	/*
+	 * XXX It's not clear why we check this a second time, but the original
+	 * driver did.
+	 */
+	uint32_t check_again = cpqary3_ctlr_get_cmdsoutmax(cpq);
+	if (check_again != cpq->ctlr_maxcmds) {
+		dev_err(cpq->dip, CE_WARN, "maximum outstanding commands "
+		    "changed during initialisation (was %u, now %u)",
+		    cpq->ctlr_maxcmds, check_again);
+		return (EPROTO);
+	}
+
+	/* SG */
+	max_sg_cnt = DDI_GET32(cpq, &ctp->MaxSGElements);
+	max_blk_fetch_cnt = DDI_GET32(cpq, &ctp->MaxBlockFetchCount);
+
+	/* 32 byte aligned - size_of_cmdlist */
+	size_of_cmdlist = ((sizeof (CommandList_t) + 31) / 32) * 32;
+	size_of_HRE  = size_of_cmdlist -
+	    (sizeof (SGDescriptor_t) * CISS_MAXSGENTRIES);
+
+	if ((max_blk_fetch_cnt == 0) || (max_sg_cnt == 0) ||
+	    ((max_blk_fetch_cnt * 16) <= size_of_HRE)) {
+		cpq->sg_cnt = CPQARY3_PERF_SG_CNT;
+	} else {
+		/*
+		 * Get the optimal_sg - no of the SG's that will fit
+		 * into the max_blk_fetch_cnt
+		 */
+
+		optimal_sg_size = (max_blk_fetch_cnt * 16) - size_of_HRE;
+
+		if (optimal_sg_size < sizeof (SGDescriptor_t)) {
+			optimal_sg = CPQARY3_PERF_SG_CNT;
+		} else {
+			optimal_sg = optimal_sg_size / sizeof (SGDescriptor_t);
+		}
+
+		cpq->sg_cnt = MIN(max_sg_cnt, optimal_sg);
+
+		if (cpq->sg_cnt > MAX_PERF_SG_CNT) {
+			cpq->sg_cnt = MAX_PERF_SG_CNT;
+		}
+	}
+
+	/* SG */
+
+	/*
+	 * Zero the Upper 32 Address in the Controller
+	 */
+
+	DDI_PUT32(cpq, &ctp->HostWrite.Upper32Addr, 0x00000000);
+
+	/* Set the controller interrupt check routine */
+
+	if (cpq->bddef->bd_is_e200) {
+		cpq->check_ctlr_intr = cpqary3_check_perf_e200_intr;
+	} else {
+		cpq->check_ctlr_intr = cpqary3_check_perf_ctlr_intr;
+	}
+
+	cpq->host_support = cpqary3_ctlr_get_hostdrvsup(cpq);
+
+	return (0);
+}
+#endif
+
+int
+cpqary3_ctlr_init(cpqary3_t *cpqary3p)
 {
 	uint8_t				signature[4] = { 'C', 'I', 'S', 'S' };
-	CfgTable_t			*ctp;
-	volatile CfgTrans_Perf_t	*perf_cfg;
+	CfgTable_t			*ctp = cpqary3p->ct;
 	cpqary3_phyctg_t		*cpqary3_phyctgp;
 	uint32_t			phy_addr;
 	size_t				cmd_size;
@@ -535,20 +785,12 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 	uint32_t			size_of_HRE = 0;
 	uint32_t			size_of_cmdlist = 0;
 	/* SG */
+	int e;
 
-	RETURN_FAILURE_IF_NULL(cpqary3p);
-	ctp = (CfgTable_t *)cpqary3p->ct;
-	perf_cfg = (CfgTrans_Perf_t *)cpqary3p->cp;
-
-	/* QUEUE CHANGES */
-	cpqary3p->drvr_replyq =
-	    (cpqary3_drvr_replyq_t *)MEM_ZALLOC(sizeof (cpqary3_drvr_replyq_t));
-	/* QUEUE CHANGES */
-
-	if (!cpqary3_check_ctlr_init(cpqary3p))
-		return (CPQARY3_FAILURE);
-
-	DTRACE_PROBE1(ctlr_init_start, CfgTable_t *, ctp);
+	if ((e = cpqary3_ctlr_wait_for_state(cpqary3p,
+	    CPQARY3_WAIT_STATE_READY) != 0)) {
+		return (e);
+	}
 
 	/*
 	 * The configuration table contains an ASCII signature ("CISS") which
@@ -560,281 +802,28 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 		    signature[i]) {
 			dev_err(cpqary3p->dip, CE_WARN, "invalid signature "
 			    "detected");
-			return (CPQARY3_FAILURE);
+			return (EPROTO);
 		}
 	}
 
+	/*
+	 * XXX Let's just do Simple mode for now...
+	 */
+#if 0
 	if (!(cpqary3p->bddef->bd_flags & SA_BD_SAS)) {
-		CmdsOutMax = DDI_GET32(cpqary3p, &ctp->CmdsOutMax);
-
-		if (CmdsOutMax == 0) {
-			cmn_err(CE_CONT, "CPQary3 : HBA Maximum Outstanding "
-			    "Commands set to Zero\n");
-			cmn_err(CE_CONT, "CPQary3 : Cannot continue driver "
-			    "initialization \n");
-			return (CPQARY3_FAILURE);
+		if ((e = cpqary3_ctlr_init_simple(cpqary3p)) != 0) {
+			return (e);
 		}
-
-		cpqary3p->ctlr_maxcmds = CmdsOutMax;
-		cpqary3p->sg_cnt = CPQARY3_SG_CNT;
-
-		queue_depth = cpqary3p->ctlr_maxcmds;
-		cmd_size = (8 * queue_depth);
-		/* QUEUE CHANGES */
-		cpqary3p->drvr_replyq->cyclic_indicator =
-		    CPQARY3_REPLYQ_INIT_CYCLIC_IND;
-		cpqary3p->drvr_replyq->simple_cyclic_indicator =
-		    CPQARY3_REPLYQ_INIT_CYCLIC_IND;
-		cpqary3p->drvr_replyq->max_index = cpqary3p->ctlr_maxcmds;
-		cpqary3p->drvr_replyq->simple_index = 0;
-		replyq_start_addr = MEM_ZALLOC(cmd_size);
-		bzero(replyq_start_addr, cmd_size);
-		cpqary3p->drvr_replyq->replyq_headptr =
-		    /* LINTED: alignment */
-		    (uint32_t *)replyq_start_addr;
-		cpqary3p->drvr_replyq->replyq_simple_ptr =
-		    /* LINTED: alignment */
-		    (uint32_t *)replyq_start_addr;
-		cpqary3p->drvr_replyq->replyq_start_addr = replyq_start_addr;
-
-		/* PERF */
-
-		if (cpqary3_cfgtbl_transport_has_support(cpqary3p,
-		    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
-			return (CPQARY3_FAILURE);
-		}
-
-		/*
-		 * Set the Transport Method and flush the changes to the
-		 * Configuration Table.
-		 */
-		cpqary3_cfgtbl_transport_set(cpqary3p,
-		    CISS_CFGTBL_XPORT_SIMPLE);
-		if (cpqary3_cfgtbl_flush(cpqary3p) != CPQARY3_SUCCESS) {
-			return (CPQARY3_FAILURE);
-		}
-
-		if (cpqary3_cfgtbl_transport_confirm(cpqary3p,
-		    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
-			return (CPQARY3_FAILURE);
-		}
-
-		/*
-		 * Check if the maximum number of oustanding commands for the
-		 * initialized controller is something greater than Zero.
-		 */
-		CmdsOutMax = DDI_GET32(cpqary3p, &ctp->CmdsOutMax);
-
-		if (CmdsOutMax == 0) {
-			cmn_err(CE_CONT, "CPQary3 : HBA Maximum Outstanding "
-			    "Commands set to Zero\n");
-			cmn_err(CE_CONT, "CPQary3 : Cannot continue driver "
-			    "initialization \n");
-			return (CPQARY3_FAILURE);
-		}
-		cpqary3p->ctlr_maxcmds = CmdsOutMax;
-
-		/*
-		 * Zero the Upper 32 Address in the Controller
-		 */
-		DDI_PUT32(cpqary3p, &ctp->HostWrite.Upper32Addr, 0x00000000);
-
-		/* Set the controller interrupt check routine */
-		cpqary3p->check_ctlr_intr = cpqary3_check_simple_ctlr_intr;
-
-		cpqary3p->host_support =
-		    DDI_GET32(cpqary3p, &ctp->HostDrvrSupport);
-		DDI_PUT32(cpqary3p, &ctp->HostDrvrSupport,
-		    (cpqary3p->host_support | 0x4));
-		cpqary3p->host_support =
-		    DDI_GET32(cpqary3p, &ctp->HostDrvrSupport);
 	} else {
-	/* PERF */
-
-		if (cpqary3_cfgtbl_transport_has_support(cpqary3p,
-		    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
-			return (CPQARY3_FAILURE);
+		if ((e = cpqary3_ctlr_init_performant(cpqary3p)) != 0) {
+			return (e);
 		}
-
-		CmdsOutMax = DDI_GET32(cpqary3p, &ctp->MaxPerfModeCmdsOutMax);
-		if (CmdsOutMax == 0)
-			CmdsOutMax = DDI_GET32(cpqary3p, &ctp->CmdsOutMax);
-		if (CmdsOutMax == 0) {
-			cmn_err(CE_CONT, "CPQary3 : HBA Maximum Outstanding "
-			    "Commands set to Zero\n");
-			cmn_err(CE_CONT, "CPQary3 : Cannot continue driver "
-			    "initialization \n");
-			return (CPQARY3_FAILURE);
-		}
-
-		cpqary3p->ctlr_maxcmds = CmdsOutMax;
-
-
-		/* Initialize the Performant Method Transport Method Table */
-
-		queue_depth = cpqary3p->ctlr_maxcmds;
-
-		DDI_PUT32_CP(cpqary3p, &perf_cfg->ReplyQSize, queue_depth);
-		DDI_PUT32_CP(cpqary3p, &perf_cfg->ReplyQCount, 1);
-		DDI_PUT32_CP(cpqary3p, &perf_cfg->ReplyQCntrAddrLow32, 0);
-		DDI_PUT32_CP(cpqary3p, &perf_cfg->ReplyQCntrAddrHigh32, 0);
-
-		cpqary3_phyctgp =
-		    (cpqary3_phyctg_t *)MEM_ZALLOC(sizeof (cpqary3_phyctg_t));
-
-		if (!cpqary3_phyctgp) {
-			cmn_err(CE_NOTE,
-			    "CPQary3: Initial mem zalloc failed");
-			return (CPQARY3_FAILURE);
-		}
-		cmd_size = (8 * queue_depth);
-		phy_addr = 0;
-		replyq_start_addr = cpqary3_alloc_phyctgs_mem(cpqary3p,
-		    cmd_size, &phy_addr, cpqary3_phyctgp);
-
-		if (!replyq_start_addr) {
-			cmn_err(CE_WARN, "MEMALLOC returned failure");
-			return (CPQARY3_FAILURE);
-		}
-
-		bzero(replyq_start_addr, cmd_size);
-		cpqary3p->drvr_replyq->replyq_headptr =
-		    /* LINTED: alignment */
-		    (uint32_t *)replyq_start_addr;
-		cpqary3p->drvr_replyq->index = 0;
-		cpqary3p->drvr_replyq->max_index = queue_depth;
-		cpqary3p->drvr_replyq->replyq_start_addr = replyq_start_addr;
-		cpqary3p->drvr_replyq->cyclic_indicator =
-		    CPQARY3_REPLYQ_INIT_CYCLIC_IND;
-		cpqary3p->drvr_replyq->replyq_start_paddr = phy_addr;
-
-		DDI_PUT32_CP(cpqary3p, &perf_cfg->ReplyQAddr0Low32, phy_addr);
-		DDI_PUT32_CP(cpqary3p, &perf_cfg->ReplyQAddr0High32, 0);
-
-		max_blk_fetch_cnt =
-		    DDI_GET32(cpqary3p, &ctp->MaxBlockFetchCount);
-
-		/*
-		 * For non-proton FW controllers, max_blk_fetch_count is not
-		 * implemented in the firmware
-		 */
-
-		/*
-		 * When blk fetch count is 0, FW auto fetches 564 bytes
-		 * corresponding to an optimal S/G of 31
-		 */
-		if (max_blk_fetch_cnt == 0) {
-			BlockFetchCnt[0] = 35;
-		} else {
-			/*
-			 * With MAX_PERF_SG_CNT set to 64, block fetch count
-			 * is got by:(sizeof (CommandList_t) + 15)/16
-			 */
-			if (max_blk_fetch_cnt > 68)
-				BlockFetchCnt[0] = 68;
-			else
-				BlockFetchCnt[0] = max_blk_fetch_cnt;
-		}
-
-		DDI_PUT32_CP(cpqary3p, &perf_cfg->BlockFetchCnt[0],
-		    BlockFetchCnt[0]);
-
-		/*
-		 * Set the Transport Method and flush the changes to the
-		 * Configuration Table.
-		 */
-		cpqary3_cfgtbl_transport_set(cpqary3p,
-		    CISS_CFGTBL_XPORT_PERFORMANT);
-		if (cpqary3_cfgtbl_flush(cpqary3p) != CPQARY3_SUCCESS) {
-			return (CPQARY3_FAILURE);
-		}
-
-		if (cpqary3_cfgtbl_transport_confirm(cpqary3p,
-		    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
-			return (CPQARY3_FAILURE);
-		}
-
-		/*
-		 * Check if the maximum number of oustanding commands for the
-		 * initialized controller is something greater than Zero.
-		 */
-		CmdsOutMax = DDI_GET32(cpqary3p, &ctp->MaxPerfModeCmdsOutMax);
-		if (CmdsOutMax == 0)
-			CmdsOutMax = DDI_GET32(cpqary3p, &ctp->CmdsOutMax);
-
-		if (CmdsOutMax == 0) {
-			cmn_err(CE_NOTE, "CPQary3 : HBA Maximum Outstanding "
-			    "Commands set to Zero");
-			cmn_err(CE_NOTE, "CPQary3 : Cannot continue driver "
-			    "initialization");
-			return (CPQARY3_FAILURE);
-		}
-
-		cpqary3p->ctlr_maxcmds = CmdsOutMax;
-
-		/* SG */
-		max_sg_cnt = DDI_GET32(cpqary3p, &ctp->MaxSGElements);
-		max_blk_fetch_cnt =
-		    DDI_GET32(cpqary3p, &ctp->MaxBlockFetchCount);
-
-		/* 32 byte aligned - size_of_cmdlist */
-		size_of_cmdlist = ((sizeof (CommandList_t) + 31) / 32) * 32;
-		size_of_HRE  = size_of_cmdlist -
-		    (sizeof (SGDescriptor_t) * CISS_MAXSGENTRIES);
-
-		if ((max_blk_fetch_cnt == 0) || (max_sg_cnt == 0) ||
-		    ((max_blk_fetch_cnt * 16) <= size_of_HRE)) {
-			cpqary3p->sg_cnt = CPQARY3_PERF_SG_CNT;
-		} else {
-			/*
-			 * Get the optimal_sg - no of the SG's that will fit
-			 * into the max_blk_fetch_cnt
-			 */
-
-			optimal_sg_size =
-			    (max_blk_fetch_cnt * 16) - size_of_HRE;
-
-			if (optimal_sg_size < sizeof (SGDescriptor_t)) {
-				optimal_sg = CPQARY3_PERF_SG_CNT;
-			} else {
-				optimal_sg =
-				    optimal_sg_size / sizeof (SGDescriptor_t);
-			}
-
-			cpqary3p->sg_cnt = MIN(max_sg_cnt, optimal_sg);
-
-			if (cpqary3p->sg_cnt > MAX_PERF_SG_CNT)
-				cpqary3p->sg_cnt = MAX_PERF_SG_CNT;
-		}
-
-		/* SG */
-
-		/*
-		 * Zero the Upper 32 Address in the Controller
-		 */
-
-		DDI_PUT32(cpqary3p, &ctp->HostWrite.Upper32Addr, 0x00000000);
-
-		/* Set the controller interrupt check routine */
-
-		if (cpqary3p->bddef->bd_is_e200) {
-			cpqary3p->check_ctlr_intr =
-			    cpqary3_check_perf_e200_intr;
-		} else {
-			cpqary3p->check_ctlr_intr =
-			    cpqary3_check_perf_ctlr_intr;
-		}
-
-		if ((!cpqary3p->bddef->bd_is_e200) &&
-		    (!cpqary3p->bddef->bd_is_ssll)) {
-			cpqary3p->host_support =
-			    DDI_GET32(cpqary3p, &ctp->HostDrvrSupport);
-			DDI_PUT32(cpqary3p, &ctp->HostDrvrSupport,
-			    (cpqary3p->host_support | 0x4));
-		}
-		cpqary3p->host_support =
-		    DDI_GET32(cpqary3p, &ctp->HostDrvrSupport);
 	}
+#else
+	if ((e = cpqary3_ctlr_init_simple(cpqary3p)) != 0) {
+		return (e);
+	}
+#endif
 
 	/*
 	 * Read initial controller heartbeat value and mark the current
@@ -844,39 +833,49 @@ cpqary3_init_ctlr(cpqary3_t *cpqary3p)
 	    &ctp->HeartBeat);
 	cpqary3p->cpq_last_heartbeat_lbolt = ddi_get_lbolt();
 
-	return (CPQARY3_SUCCESS);
+	return (0);
 }
 
-/*
- * Function	: 	cpqary3_check_ctlr_init
- * Description	: 	This routine checks to see if the HBA is initialized.
- * Called By	: 	cpqary3_init_ctlr()
- * Parameters	: 	per-controller
- * Calls	: 	None
- * Return Values: 	SUCCESS / FAILURE
- */
-uint8_t
-cpqary3_check_ctlr_init(cpqary3_t *cpqary3p)
+int
+cpqary3_ctlr_wait_for_state(cpqary3_t *cpq, cpqary3_wait_state_t state)
 {
-	/*
-	 * Read from the Scratchpad Register until the expected ready
-	 * signature is detected.  This behaviour is not described in
-	 * the CISS specification.
-	 *
-	 * If the device is not ready immediate, sleep for a second and
-	 * try again.  If the device has not become ready in 300 seconds,
-	 * give up.
-	 */
-	for (unsigned i = 0; i < 300; i++) {
-		uint32_t spr = ddi_get32(cpqary3p->spr0_handle,
-		    cpqary3p->spr0);
+	VERIFY(state == CPQARY3_WAIT_STATE_READY ||
+	    state == CPQARY3_WAIT_STATE_UNREADY);
 
-		if (spr == CISS_SCRATCHPAD_INITIALISED) {
-			return (CPQARY3_SUCCESS);
+	/*
+	 * Read from the Scratchpad Register until the expected ready signature
+	 * is detected.  This behaviour is not described in the CISS
+	 * specification.
+	 *
+	 * If the device is not in the desired state immediately, sleep for a
+	 * second and try again.  If the device has not become ready in 300
+	 * seconds, give up.
+	 */
+	for (unsigned i = 0; i < CPQARY3_WAIT_DELAY_SECONDS; i++) {
+		uint32_t spr = ddi_get32(cpq->spr0_handle, cpq->spr0);
+
+		switch (state) {
+		case CPQARY3_WAIT_STATE_READY:
+			if (spr == CISS_SCRATCHPAD_INITIALISED) {
+				return (0);
+			}
+			break;
+
+		case CPQARY3_WAIT_STATE_UNREADY:
+			if (spr != CISS_SCRATCHPAD_INITIALISED) {
+				return (0);
+			}
+			break;
 		}
+
+		/*
+		 * Wait for a second and try again.
+		 */
+		delay(drv_usectohz(1000000));
 	}
 
-	dev_err(cpqary3p->dip, CE_WARN, "time out waiting for controller "
-	    "to become ready");
-	return (CPQARY3_FAILURE);
+	dev_err(cpq->dip, CE_WARN, "time out waiting for controller "
+	    "to enter state \"%s\"", state == CPQARY3_WAIT_STATE_READY ?
+	    "ready": "unready");
+	return (ETIMEDOUT);
 }
