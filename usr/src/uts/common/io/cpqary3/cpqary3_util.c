@@ -127,11 +127,7 @@ cpqary3_periodic(void *arg)
 	cpqary3_t *cpq = arg;
 	uint32_t no_cmds;
 
-	dev_err(cpq->dip, CE_WARN, "PERIODIC START");
-
 	cpqary3_lockup_check(cpq);
-
-	dev_err(cpq->dip, CE_WARN, "PERIODIC END");
 
 	/*
 	 * XXX This should be re-tooled to use "cpq_inflight".
