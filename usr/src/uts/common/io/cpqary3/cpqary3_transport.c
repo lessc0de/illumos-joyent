@@ -121,7 +121,7 @@ cpqary3_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 
 	extern int8_t	cpqary3_detect_target_geometry(cpqary3_t *);
 	if ((CPQARY3_SUCCESS == cpqary3_probe4targets(ctlr)) &&
-	    (ctlr->num_of_targets > 0)) {
+	    (ctlr->cpq_ntargets > 0)) {
 		(void) cpqary3_detect_target_geometry(ctlr);
 	}
 
@@ -187,7 +187,7 @@ cpqary3_tgt_probe(struct scsi_device *sd, int (*waitfunc)())
 	cpqary3_t		*ctlr = hba_tran->tran_hba_private;
 
 	if ((CPQARY3_SUCCESS == cpqary3_probe4targets(ctlr)) &&
-	    (ctlr->num_of_targets > 0)) {
+	    (ctlr->cpq_ntargets > 0)) {
 		(void) cpqary3_detect_target_geometry(ctlr);
 	}
 	/* HPQacucli Changes */
@@ -345,10 +345,7 @@ cpqary3_dma_alloc(cpqary3_t *cpqary3p, struct scsi_pkt *scsi_pktp,
 	}
 
 	tmp_dma_attr = cpqary3_dma_attr;
-
-	/* SG */
-	tmp_dma_attr.dma_attr_sgllen = cpqary3p->sg_cnt;
-	/* SG */
+	tmp_dma_attr.dma_attr_sgllen = cpqary3p->cpq_sg_cnt;
 
 	cb = (callback == NULL_FUNC) ? DDI_DMA_DONTWAIT : DDI_DMA_SLEEP;
 
@@ -429,7 +426,7 @@ cpqary3_dma_alloc(cpqary3_t *cpqary3p, struct scsi_pkt *scsi_pktp,
 			    cpqary3_pktp->cmd_dmacookies[i++].dmac_size;
 			/* SG */
 			/* Check Out for Limits */
-			if (i == cpqary3p->sg_cnt ||
+			if (i == cpqary3p->cpq_sg_cnt ||
 			    i == cpqary3_pktp->cmd_ncookies)
 				break;
 			/* SG */
@@ -529,7 +526,7 @@ cpqary3_dma_move(struct scsi_pkt *scsi_pktp, struct buf *bp,
 		cpqary3_pktp->cmd_cookie++;
 		/* SG */
 		/* no. of DATA SEGMENTS */
-		if (i == cpqary3p->sg_cnt ||
+		if (i == cpqary3p->cpq_sg_cnt ||
 		    cpqary3_pktp->cmd_cookie == cpqary3_pktp->cmd_ncookies) {
 			break;
 		}
@@ -607,7 +604,7 @@ cpqary3_transport(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 		    DDI_DMA_SYNC_FORDEV);
 	}
 
-	VERIFY(cpqary3_pktp->cmd_cookiecnt <= ctlr->sg_cnt);
+	VERIFY(cpqary3_pktp->cmd_cookiecnt <= ctlr->cpq_sg_cnt);
 
 	cpcm->cpcm_complete = cpqary3_oscmd_complete;
 
@@ -956,7 +953,7 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 	mutex_enter(&ctlr->hw_mutex);
 	ctlr->cpq_intr_off = B_TRUE;
 	cpqary3_intr_onoff(ctlr, CPQARY3_INTR_DISABLE);
-	if (ctlr->host_support & 0x4)
+	if (ctlr->cpq_host_support & 0x4)
 		cpqary3_lockup_intr_onoff(ctlr, CPQARY3_LOCKUP_INTR_DISABLE);
 
 	while (avl_numnodes(&ctlr->cpq_inflight) > 0) {
@@ -967,7 +964,7 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 	if (cpqary3_submit(ctlr, cpcm) != 0) {
 		ctlr->cpq_intr_off = B_FALSE;
 		cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
-		if (ctlr->host_support & 0x4) {
+		if (ctlr->cpq_host_support & 0x4) {
 			cpqary3_lockup_intr_onoff(ctlr,
 			    CPQARY3_LOCKUP_INTR_ENABLE);
 		}
@@ -986,7 +983,7 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 
 		ctlr->cpq_intr_off = B_FALSE;
 		cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
-		if (ctlr->host_support & 0x4) {
+		if (ctlr->cpq_host_support & 0x4) {
 			cpqary3_lockup_intr_onoff(ctlr,
 			    CPQARY3_LOCKUP_INTR_ENABLE);
 		}
@@ -1000,7 +997,7 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 
 	ctlr->cpq_intr_off = B_FALSE;
 	cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
-	if (ctlr->host_support & 0x4) {
+	if (ctlr->cpq_host_support & 0x4) {
 		cpqary3_lockup_intr_onoff(ctlr, CPQARY3_LOCKUP_INTR_ENABLE);
 	}
 

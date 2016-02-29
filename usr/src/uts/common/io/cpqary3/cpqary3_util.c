@@ -17,63 +17,14 @@
 #include <sys/sdt.h>
 #include "cpqary3.h"
 
-/*
- * Local Functions Definitions
- */
-
-int cpqary3_target_geometry(struct scsi_address *);
-int8_t cpqary3_detect_target_geometry(cpqary3_t *);
-
-/*
- * Function	: 	cpqary3_read_conf_file
- * Description	: 	This routine reads the driver configuration file.
- * Called By	: 	cpqary3_attach()
- * Parameters	: 	device-information pointer, per_controller
- * Calls	: 	None
- * Return Values: 	None
- */
-void
-cpqary3_read_conf_file(dev_info_t *dip, cpqary3_t *cpqary3p)
-{
-	char		*ptr;
-
-	cpqary3p->noe_support = 0;
-
-	/*
-	 * Plugin the code necessary to read from driver's conf file.
-	 * As of now, we are not interested in reading the onf file
-	 * for any purpose.
-	 *
-	 * eg. :
-	 *
-	 * retvalue = ddi_getprop(DDI_DEV_T_NONE, dip, DDI_PROP_DONTPASS,
-	 *	"cpqary3_online_debug", -1);
-	 */
-
-	/*
-	 *  We are calling ddi_prop_lookup_string
-	 *  which gets the property value, which is passed at
-	 *  the grub menu.  
-	 */
-	if (ddi_prop_lookup_string(DDI_DEV_T_ANY, dip, 0,
-	    "cpqary3_noesupport", &ptr) == DDI_PROP_SUCCESS) {
-		if (strcmp("on", ptr) == 0) {
-			cpqary3p->noe_support = 1;
-		}
-		if (strcmp("off", ptr) == 0) {
-			cpqary3p->noe_support = 0;
-		}
-		ddi_prop_free(ptr);
-	}
-}
-
 void
 cpqary3_lockup_check(cpqary3_t *cpq)
 {
 	/*
 	 * Read the current controller heartbeat value.
 	 */
-	uint32_t heartbeat = ddi_get32(cpq->ct_handle, &cpq->ct->HeartBeat);
+	uint32_t heartbeat = ddi_get32(cpq->cpq_ct_handle,
+	    &cpq->cpq_ct->HeartBeat);
 
 	/*
 	 * Check to see if the value is the same as last time we looked:
@@ -95,8 +46,8 @@ cpqary3_lockup_check(cpqary3_t *cpq)
 	 * If the firmware can tell it has flown off the rails, why not
 	 * simply reset the controller?
 	 */
-	uint32_t odr = ddi_get32(cpq->odr_handle, cpq->odr);
-	uint32_t spr = ddi_get32(cpq->spr0_handle, cpq->spr0);
+	uint32_t odr = cpqary3_get32(cpq, CISS_I2O_OUTBOUND_DOORBELL_STATUS);
+	uint32_t spr = cpqary3_get32(cpq, CISS_I2O_SCRATCHPAD);
 	if ((odr & CISS_ODR_BIT_LOCKUP) != 0) {
 		dev_err(cpq->dip, CE_PANIC, "HP SmartArray firmware has "
 		    "reported a critical fault (odr %08x spr %08x)",
@@ -128,6 +79,9 @@ cpqary3_periodic(void *arg)
 	uint32_t no_cmds;
 
 	cpqary3_lockup_check(cpq);
+
+	mutex_enter(&cpq->hw_mutex);
+	mutex_exit(&cpq->hw_mutex);
 
 	/*
 	 * XXX This should be re-tooled to use "cpq_inflight".
@@ -195,95 +149,6 @@ cpqary3_lookup_inflight(cpqary3_t *cpq, uint32_t tag)
 	return (avl_find(&cpq->cpq_inflight, &srch, NULL));
 }
 
-static int
-cpqary3_comparator(const void *lp, const void *rp)
-{
-	const cpqary3_command_t *l = lp;
-	const cpqary3_command_t *r = rp;
-
-	if (l->cpcm_tag > r->cpcm_tag) {
-		return (1);
-	} else if (l->cpcm_tag < r->cpcm_tag) {
-		return (-1);
-	} else {
-		return (0);
-	}
-}
-
-/*
- * Function	: 	cpqary3_init_ctlr_resource
- * Description	: 	This routine initializes the command list, initializes
- *			the controller, enables the interrupt.
- * Called By	: 	cpqary3_attach()
- * Parameters	: 	per_controller
- * Calls	: 	cpqary3_init_ctlr(), cpqary3_meminit(),
- * 			cpqary3_intr_onoff(),
- * Return Values: 	SUCCESS / FAILURE
- *			[ Shall return failure if any of the mandatory
- *			initializations / setup of resources fail ]
- */
-uint16_t
-cpqary3_init_ctlr_resource(cpqary3_t *ctlr)
-{
-	list_create(&ctlr->cpq_commands, sizeof (cpqary3_command_t),
-	    offsetof(cpqary3_command_t, cpcm_link));
-	avl_create(&ctlr->cpq_inflight, cpqary3_comparator,
-	    sizeof (cpqary3_command_t), offsetof(cpqary3_command_t, cpcm_node));
-
-	/*
-	 * Initialize the Controller
-	 * Alocate Memory Pool for driver supported number of Commands
-	 * return if not successful
-	 * Allocate target structure for controller and initialize the same
-	 * Detect all existing targets and allocate target structure for each
-	 * Determine geometry for all existing targets
-	 * Initialize the condition variables
-	 */
-	if (cpqary3_ctlr_init(ctlr) != 0) {
-		dev_err(ctlr->dip, CE_WARN, "cpqary3_ctlr_init failed");
-		return (CPQARY3_FAILURE);
-	}
-
-	/*
-	 * XXX
-	 */
-#if 0
-	if (cpqary3_meminit(ctlr) != CPQARY3_SUCCESS) {
-		return (CPQARY3_FAILURE);
-	}
-#endif
-
-	ctlr->cpqary3_tgtp[CTLR_SCSI_ID] = kmem_zalloc(sizeof (cpqary3_tgt_t),
-	    KM_NOSLEEP);
-	if (!(ctlr->cpqary3_tgtp[CTLR_SCSI_ID])) {
-		cmn_err(CE_WARN, "CPQary3: Target Initialization Failed");
-#if 0
-		cpqary3_memfini(ctlr, CPQARY3_MEMLIST_DONE |
-		    CPQARY3_PHYCTGS_DONE | CPQARY3_CMDMEM_DONE);
-#endif
-		return (CPQARY3_FAILURE);
-	}
-	ctlr->cpqary3_tgtp[CTLR_SCSI_ID]->type = CPQARY3_TARGET_CTLR;
-
-	cpqary3_intr_onoff(ctlr, CPQARY3_INTR_DISABLE);
-
-	/*
-	 * Initialize all condition variables :
-	 * for the immediate call back
-	 * for the disable noe
-	 * for fulsh cache
-	 * for probe device
-	 */
-
-	cv_init(&ctlr->cv_immediate_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&ctlr->cv_noe_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&ctlr->cv_flushcache_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&ctlr->cv_abort_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&ctlr->cv_ioctl_wait, NULL, CV_DRIVER, NULL);
-
-	return (CPQARY3_SUCCESS);
-}
-
 /*
  * Function	: 	cpqary3_target_geometry
  * Description	: 	This function returns the geometry for the target.
@@ -328,6 +193,7 @@ cpqary3_synccmd_alloc(cpqary3_t *cpq, size_t bufsz)
 	}
 
 	cpcm->cpcm_type = CPQARY3_CMDTYPE_SYNCCMD;
+	cpcm->cpcm_complete = cpqary3_synccmd_complete;
 
 	if (bufsz == 0) {
 		return (cpcm);
@@ -429,6 +295,8 @@ cpqary3_synccmd_send(cpqary3_t *cpqary3p, cpqary3_command_t *cpcm,
 	clock_t		absto = 0;  /* absolute timeout */
 	boolean_t waitsig = B_FALSE;
 	int		rc = 0;
+
+	VERIFY(cpcm->cpcm_type == CPQARY3_CMDTYPE_SYNCCMD);
 
 	/*  compute absolute timeout, if necessary  */
 	if (timeoutms > 0) {
@@ -568,7 +436,7 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 	 * the next logical drive in the per-target structure
 	 */
 
-	for (i = 0; ld_count < ctlr->num_of_targets; i++) {
+	for (i = 0; ld_count < ctlr->cpq_ntargets; i++) {
 		if (i == CTLR_SCSI_ID || ctlr->cpqary3_tgtp[i] == NULL) {
 			/*  Go to the Next logical target  */
 			continue;

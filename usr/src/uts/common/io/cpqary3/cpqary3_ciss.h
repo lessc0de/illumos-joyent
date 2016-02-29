@@ -21,8 +21,6 @@
 extern "C" {
 #endif
 
-#define	CISS_VERSION		"1.00"
-
 /* General Boundary Defintions */
 #define	CISS_INIT_TIME		90	/* Driver Defined Value */
 					/* Duration to Wait for the */
@@ -33,50 +31,79 @@ extern "C" {
 #define	CISS_MAXREPLYQS		256
 
 /* Command Status Value */
-#define	CISS_CMD_SUCCESS		0x00
-#define	CISS_CMD_TARGET_STATUS		0x01
-#define	CISS_CMD_DATA_UNDERRUN		0x02
-#define	CISS_CMD_DATA_OVERRUN		0x03
-#define	CISS_CMD_INVALID		0x04
-#define	CISS_CMD_PROTOCOL_ERR		0x05
-#define	CISS_CMD_HARDWARE_ERR		0x06
-#define	CISS_CMD_CONNECTION_LOST	0x07
-#define	CISS_CMD_ABORTED		0x08
-#define	CISS_CMD_ABORT_FAILED		0x09
-#define	CISS_CMD_UNSOLICITED_ABORT	0x0A
-#define	CISS_CMD_TIMEOUT		0x0B
-#define	CISS_CMD_UNABORTABLE		0x0C
+#define	CISS_CMD_SUCCESS			0x00
+#define	CISS_CMD_TARGET_STATUS			0x01
+#define	CISS_CMD_DATA_UNDERRUN			0x02
+#define	CISS_CMD_DATA_OVERRUN			0x03
+#define	CISS_CMD_INVALID			0x04
+#define	CISS_CMD_PROTOCOL_ERR			0x05
+#define	CISS_CMD_HARDWARE_ERR			0x06
+#define	CISS_CMD_CONNECTION_LOST		0x07
+#define	CISS_CMD_ABORTED			0x08
+#define	CISS_CMD_ABORT_FAILED			0x09
+#define	CISS_CMD_UNSOLICITED_ABORT		0x0a
+#define	CISS_CMD_TIMEOUT			0x0b
+#define	CISS_CMD_UNABORTABLE			0x0c
 
 /* Transfer Direction */
-#define	CISS_XFER_NONE		0x00
-#define	CISS_XFER_WRITE		0x01
-#define	CISS_XFER_READ		0x02
-#define	CISS_XFER_RSVD		0x03
+#define	CISS_XFER_NONE				0x00
+#define	CISS_XFER_WRITE				0x01
+#define	CISS_XFER_READ				0x02
+#define	CISS_XFER_RSVD				0x03
 
-#define	CISS_ATTR_UNTAGGED	0x00
-#define	CISS_ATTR_SIMPLE	0x04
-#define	CISS_ATTR_HEADOFQUEUE	0x05
-#define	CISS_ATTR_ORDERED	0x06
+#define	CISS_ATTR_UNTAGGED			0x00
+#define	CISS_ATTR_SIMPLE			0x04
+#define	CISS_ATTR_HEADOFQUEUE			0x05
+#define	CISS_ATTR_ORDERED			0x06
 
 /* CDB Type */
-#define	CISS_TYPE_CMD		0x00
-#define	CISS_TYPE_MSG		0x01
+#define	CISS_TYPE_CMD				0x00
+#define	CISS_TYPE_MSG				0x01
 
-/* Config Space Register Offsetsp */
-#define	CFG_VENDORID		0x00
-#define	CFG_DEVICEID		0x02
-#define	CFG_I2OBAR		0x10
-#define	CFG_MEM1BAR		0x14
+/*
+ * I2O Space Register Offsets
+ *
+ * The name "I2O", and these register offsets, appear to be amongst the last
+ * vestiges of a long-defunct attempt at standardising mainframe-style I/O
+ * channels in the Intel server space: the Intelligent Input/Output (I2O)
+ * Architecture Specification.
+ *
+ * The draft of version 1.5 of this specification, in section "4.2.1.5.1
+ * Extensions for PCI", suggests that the following are memory offsets into
+ * "the memory region specified by the first base address configuration
+ * register indicating memory space (offset 10h, 14h, and so forth)".  These
+ * match up with the offsets of the first two BARs in a PCI configuration space
+ * type 0 header.
+ *
+ * The specification also calls out the Inbound Post List FIFO, write-only at
+ * offset 40h; the Outbound Post List FIFO, read-only at offset 44h; the
+ * Interrupt Status Register, at offset 30h; and the Interrupt Mask Register,
+ * at offset 34h.
+ *
+ * This ill-fated attempt to increase the proprietary complexity of (and
+ * presumably, thus, the gross margin on) computer systems folded at the turn
+ * of the century.  The transport layer of this storage controller is all
+ * that's left of their religion.
+ */
+#define	CISS_I2O_INBOUND_DOORBELL		0x20
+#define	CISS_I2O_INTERRUPT_STATUS		0x30
+#define	CISS_I2O_INTERRUPT_MASK			0x34
+#define	CISS_I2O_INBOUND_POST_Q			0x40
+#define	CISS_I2O_OUTBOUND_POST_Q		0x44
+#define	CISS_I2O_OUTBOUND_DOORBELL_STATUS	0x9c
+#define	CISS_I2O_OUTBOUND_DOORBELL_CLEAR	0xa0
+#define	CISS_I2O_SCRATCHPAD			0xb0
+#define	CISS_I2O_CFGTBL_CFG_OFFSET		0xb4
+#define	CISS_I2O_CFGTBL_MEM_OFFSET		0xb8
 
-/* I2O Space Register Offsets */
-#define	I2O_INBOUND_DOORBELL	0x20
-#define	I2O_INT_STATUS		0x30
-#define	I2O_INT_MASK		0x34
-#define	I2O_IBPOST_Q		0x40
-#define	I2O_OBPOST_Q		0x44
-#define	I2O_OBDB_STATUS		0x9C
-#define	I2O_OBDB_CLEAR		0xA0
-#define	I2O_SCRATCHPAD		0xB0
+/*
+ * Rather than make a lot of small mappings for each part of the address
+ * space we wish to access, we will make one large mapping.  If more
+ * offsets are added to the I2O list above, this space should be extended
+ * appropriately.
+ */
+#define	CISS_I2O_MAP_BASE			0x20
+#define	CISS_I2O_MAP_LIMIT			0x100
 
 /*
  * The Scratchpad Register (I2O_SCRATCHPAD) is not mentioned in the CISS
@@ -90,8 +117,8 @@ extern "C" {
  * Outbound Doorbell Register Values.
  *
  * These are read from the Outbound Doorbell Set/Status Register
- * (I2O_OBDB_STATUS), but cleared by writing to the Clear
- * Register (I2O_OBDB_CLEAR).
+ * (CISS_I2O_OUTBOUND_DOORBELL_STATUS), but cleared by writing to the Clear
+ * Register (CISS_I2O_OUTBOUND_DOORBELL_CLEAR).
  */
 #define	CISS_ODR_BIT_INTERRUPT			(1UL << 0)
 #define	CISS_ODR_BIT_LOCKUP			(1UL << 1)
@@ -100,7 +127,7 @@ extern "C" {
  * Inbound Doorbell Register Values.
  *
  * These are written to and read from the Inbound Doorbell Register
- * (I2O_INBOUND_DOORBELL).
+ * (CISS_I2O_INBOUND_DOORBELL).
  */
 #define	CISS_IDR_BIT_CFGTBL_CHANGE		(1UL << 0)
 
@@ -119,14 +146,6 @@ extern "C" {
 #define	CISS_CFGTBL_XPORT_SIMPLE		(1UL << 1)
 #define	CISS_CFGTBL_XPORT_PERFORMANT		(1UL << 2)
 #define	CISS_CFGTBL_XPORT_MEMQ			(1UL << 4)
-
-/* for hard reset of the controller */
-#define	CISS_POWER_OFF		0x03	/* Self Defined */
-#define	CISS_POWER_ON		0x00	/* Self Defined */
-#define	CISS_POWER_REG_OFFSET	0xF4	/* Self Defined */
-
-#define	CT_CFG_OFFSET		0xB4
-#define	CT_MEM_OFFSET		0xB8
 
 /*
  * STRUCTURES

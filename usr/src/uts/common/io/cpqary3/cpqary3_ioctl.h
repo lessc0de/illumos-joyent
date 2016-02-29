@@ -67,35 +67,6 @@ typedef struct cpqary3_ioctl_request {
 	uint64_t	argp;		/* Data or data Buffer of the request */
 } cpqary3_ioctl_request_t;
 
-typedef struct cpqary3_drvrev {
-	uint8_t		minor; 		/* Version info */
-	uint8_t		major;
-	uint8_t		mm;		/* Revision Date */
-	uint8_t		dd;
-	uint16_t	yyyy;
-} cpqary3_drvrev_t;
-
-typedef struct cpqary3_driver_info {
-	int8_t		name[16];	/* Null Term. ASCII driver name */
-	cpqary3_drvrev_t version;	/* Driver version and revision */
-	uint32_t	num_ctlr;	/* Num of ctlrs currently handled */
-	uint32_t	max_num_ctlr;	/* Max num ctlrs supported */
-	int8_t		reserved[98];	/* Structure size = 128 bytes */
-} cpqary3_driver_info_t;
-
-typedef struct cpqary3_ctlr_info {
-	uint16_t	state;		/* currently set to active */
-	uint32_t	board_id;	/* controllers board_id */
-	uint32_t	subsystem_id;	/* controllers subsystem_id */
-	uint8_t		bus;		/* controllers PCI Bus number */
-	uint8_t		dev : 5;	/* 5 bit device number */
-	uint8_t		fun : 3;	/* 3 bit function number */
-	uint16_t	slot_num;	/* physical slot number */
-	uint8_t		num_of_tgts;	/* No of Logical Drives */
-	uint32_t	controller_instance; /* Ap id number */
-	int8_t		reserved[109];	/* Structure size = 128 bytes */
-} cpqary3_ctlr_info_t;
-
 typedef struct cpqary3_bmic_pass {
 	uint8_t		lun_addr[8];	/* 8 byte LUN address */
 	uint8_t		cmd;		/* BMIC command opcode */

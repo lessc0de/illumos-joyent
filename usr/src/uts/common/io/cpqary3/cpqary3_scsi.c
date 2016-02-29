@@ -357,8 +357,6 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 	DTRACE_PROBE2(rll_cmd_send, CommandList_t *, cmdlistp,
 	    cpqary3_cmdpvt_t *, cpcm);
 
-	cpcm->cpcm_complete = cpqary3_synccmd_complete;
-
 	if (cpqary3_synccmd_send(cpqary3p, cpcm, 90000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
 		cpqary3_synccmd_free(cpqary3p, cpcm);
@@ -391,7 +389,7 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 		log_lun_no = MAX_LOGDRV;
 	}
 
-	cpqary3p->num_of_targets = log_lun_no;
+	cpqary3p->cpq_ntargets = log_lun_no;
 	DTRACE_PROBE1(update_lvlun_count, ulong_t, log_lun_no);
 
 	/*
@@ -586,7 +584,7 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	 * if the controller is SAS or CISS and then assigning the value of the
 	 * TAPE BASE accordingly
 	 */
-	if (cpqary3p->bddef->bd_flags & SA_BD_SAS) {
+	if (cpqary3p->cpq_board->bd_flags & SA_BD_SAS) {
 		ii = 0x41;	/* MAX_LOGDRV + 1 - 64 + 1 */
 	} else {
 		ii = 0x21;	/* MAX_LOGDRV + 1 - 32 + 1 */

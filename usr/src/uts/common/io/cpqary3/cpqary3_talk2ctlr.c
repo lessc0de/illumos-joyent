@@ -41,20 +41,19 @@ uint8_t cpqary3_check_perf_e200_intr(cpqary3_t *cpqary3p);
  *			FAILURE : It did not.
  */
 uint8_t
-cpqary3_check_simple_ctlr_intr(cpqary3_t *cpqary3p)
+cpqary3_check_simple_ctlr_intr(cpqary3_t *cpq)
 {
-	uint32_t	intr_pending_mask = 0;
+	uint32_t intr_pending_mask = cpq->cpq_board->bd_intrpendmask;
 
 	/*
 	 * Read the Interrupt Status Register and
 	 * if bit 3 is set, it indicates that we have completed commands
 	 * in the controller
 	 */
-	intr_pending_mask = cpqary3p->bddef->bd_intrpendmask;
-
 	if (intr_pending_mask &
-	    (ddi_get32(cpqary3p->isr_handle, (uint32_t *)cpqary3p->isr)))
+	    cpqary3_get32(cpq, CISS_I2O_INTERRUPT_STATUS)) {
 		return (CPQARY3_SUCCESS);
+	}
 
 	return (CPQARY3_FAILURE);
 }
@@ -70,15 +69,15 @@ cpqary3_check_simple_ctlr_intr(cpqary3_t *cpqary3p)
  *			FAILURE : It did not.
  */
 uint8_t
-cpqary3_check_perf_ctlr_intr(cpqary3_t *cpqary3p)
+cpqary3_check_perf_ctlr_intr(cpqary3_t *cpq)
 {
 	/*
 	 * Read the Interrupt Status Register and
 	 * if bit 3 is set, it indicates that we have completed commands
 	 * in the controller
+	 * XXX _which_ bit?
 	 */
-	if (0x1 & (ddi_get32(cpqary3p->isr_handle,
-	    (uint32_t *)cpqary3p->isr))) {
+	if (cpqary3_get32(cpq, CISS_I2O_INTERRUPT_STATUS) & 0x1) {
 		return (CPQARY3_SUCCESS);
 	}
 
@@ -96,15 +95,14 @@ cpqary3_check_perf_ctlr_intr(cpqary3_t *cpqary3p)
  *			FAILURE : It did not.
  */
 uint8_t
-cpqary3_check_perf_e200_intr(cpqary3_t *cpqary3p)
+cpqary3_check_perf_e200_intr(cpqary3_t *cpq)
 {
 	/*
 	 * Read the Interrupt Status Register and
 	 * if bit 3 is set, it indicates that we have completed commands
 	 * in the controller
 	 */
-	if (0x4 & (ddi_get32(cpqary3p->isr_handle,
-	    (uint32_t *)cpqary3p->isr))) {
+	if (cpqary3_get32(cpq, CISS_I2O_INTERRUPT_STATUS) & 0x4) {
 		return (CPQARY3_SUCCESS);
 	}
 
@@ -119,11 +117,12 @@ void
 cpqary3_retrieve_simple(cpqary3_t *cpq, uint32_t watchfor, boolean_t *found)
 {
 	uint32_t opq;
+	uint32_t none = 0xffffffff;
 
 	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
 	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
 
-	while ((opq = ddi_get32(cpq->opq_handle, cpq->opq)) != 0xffffffff) {
+	while ((opq = cpqary3_get32(cpq, CISS_I2O_OUTBOUND_POST_Q)) != none) {
 		cpqary3_command_t *cpcm;
 		uint32_t tag = opq >> 2; /* XXX */
 
@@ -198,11 +197,11 @@ cpqary3_retrieve(cpqary3_t *cpq)
 	switch (cpq->cpq_ctlr_mode) {
 	case CPQARY3_CTLR_MODE_SIMPLE:
 		cpqary3_retrieve_simple(cpq, 0, NULL);
-		return (CPQARY3_SUCCESS);
+		return (DDI_SUCCESS);
 
 	case CPQARY3_CTLR_MODE_PERFORMANT:
 		cpqary3_retrieve_performant(cpq, 0, NULL);
-		return (CPQARY3_SUCCESS);
+		return (DDI_SUCCESS);
 
 	case CPQARY3_CTLR_MODE_UNKNOWN:
 		break;
@@ -243,7 +242,7 @@ cpqary3_poll_retrieve(cpqary3_t *cpq, uint32_t poll_tag)
 		panic("unknown controller mode");
 	}
 
-	return (found ? CPQARY3_SUCCESS : CPQARY3_FAILURE);
+	return (found ? DDI_SUCCESS : DDI_FAILURE);
 }
 
 /*
@@ -293,7 +292,7 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 
 	switch (cpq->cpq_ctlr_mode) {
 	case CPQARY3_CTLR_MODE_SIMPLE:
-		ddi_put32(cpq->ipq_handle, cpq->ipq, cpcm->cpcm_pa_cmd);
+		cpqary3_put32(cpq, CISS_I2O_INBOUND_POST_Q, cpcm->cpcm_pa_cmd);
 		break;
 
 	case CPQARY3_CTLR_MODE_PERFORMANT:
@@ -303,7 +302,7 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 		 * (NB: from spec, the 0x1 here sets "pull from host memory"
 		 * mode, and the 0 represents "pull just one command record"
 		 */
-		ddi_put32(cpq->ipq_handle, cpq->ipq,
+		cpqary3_put32(cpq, CISS_I2O_INBOUND_POST_Q,
 		    cpcm->cpcm_pa_cmd | 0 | 0x1);
 		break;
 
@@ -330,7 +329,7 @@ cpqary3_intr_onoff(cpqary3_t *cpq, uint8_t flag)
 	/*
 	 * Read the Interrupt Mask Register.
 	 */
-	uint32_t imr = ddi_get32(cpq->imr_handle, cpq->imr);
+	uint32_t imr = cpqary3_get32(cpq, CISS_I2O_INTERRUPT_MASK);
 
 	VERIFY(flag == CPQARY3_INTR_ENABLE || flag == CPQARY3_INTR_DISABLE);
 
@@ -345,14 +344,14 @@ cpqary3_intr_onoff(cpqary3_t *cpq, uint8_t flag)
 
 	default:
 		if (flag == CPQARY3_INTR_ENABLE) {
-			imr &= ~cpq->bddef->bd_intrmask;
+			imr &= ~cpq->cpq_board->bd_intrmask;
 		} else {
-			imr |= cpq->bddef->bd_intrmask;
+			imr |= cpq->cpq_board->bd_intrmask;
 		}
 		break;
 	}
 
-	ddi_put32(cpq->imr_handle, cpq->imr, imr);
+	cpqary3_put32(cpq, CISS_I2O_INTERRUPT_MASK, imr);
 }
 
 /*
@@ -366,26 +365,26 @@ cpqary3_intr_onoff(cpqary3_t *cpq, uint8_t flag)
  * Return Values: 	None
  */
 void
-cpqary3_lockup_intr_onoff(cpqary3_t *cpqary3p, uint8_t flag)
+cpqary3_lockup_intr_onoff(cpqary3_t *cpq, uint8_t flag)
 {
 	/*
 	 * Read the Interrupt Mask Register.
 	 */
-	uint32_t imr = ddi_get32(cpqary3p->imr_handle, cpqary3p->imr);
+	uint32_t imr = cpqary3_get32(cpq, CISS_I2O_INTERRUPT_MASK);
 
 	/*
 	 * Enable or disable firmware lockup interrupts from the controller
 	 * based on the flag.
 	 */
 	if (flag == CPQARY3_LOCKUP_INTR_ENABLE) {
-		imr &= ~cpqary3p->bddef->bd_lockup_intrmask;
+		imr &= ~cpq->cpq_board->bd_lockup_intrmask;
 	} else {
 		VERIFY(flag == CPQARY3_LOCKUP_INTR_DISABLE);
 
-		imr |= cpqary3p->bddef->bd_lockup_intrmask;
+		imr |= cpq->cpq_board->bd_lockup_intrmask;
 	}
 
-	ddi_put32(cpqary3p->imr_handle, cpqary3p->imr, imr);
+	cpqary3_put32(cpq, CISS_I2O_INTERRUPT_MASK, imr);
 }
 
 /*
@@ -393,31 +392,31 @@ cpqary3_lockup_intr_onoff(cpqary3_t *cpqary3p, uint8_t flag)
  * writing to the Inbound Doorbell Register.  The controller will, after some
  * number of seconds, acknowledge this by clearing the bit.
  *
- * If successful, return CPQARY3_SUCCESS.  If the controller takes too long to
- * acknowledge, return CPQARY3_FAILURE.
+ * If successful, return DDI_SUCCESS.  If the controller takes too long to
+ * acknowledge, return DDI_FAILURE.
  */
 static int
-cpqary3_cfgtbl_flush(cpqary3_t *cpqary3p)
+cpqary3_cfgtbl_flush(cpqary3_t *cpq)
 {
 	/*
 	 * Read the current value of the Inbound Doorbell Register.
 	 */
-	uint32_t idr = ddi_get32(cpqary3p->idr_handle, cpqary3p->idr);
+	uint32_t idr = cpqary3_get32(cpq, CISS_I2O_INBOUND_DOORBELL);
 
 	/*
 	 * Signal the Configuration Table change to the controller.
 	 */
 	idr |= CISS_IDR_BIT_CFGTBL_CHANGE;
-	ddi_put32(cpqary3p->idr_handle, cpqary3p->idr, idr);
+	cpqary3_put32(cpq, CISS_I2O_INBOUND_DOORBELL, idr);
 
 	/*
 	 * Wait for the controller to acknowledge the change.
 	 */
 	for (unsigned i = 0; i < CISS_INIT_TIME; i++) {
-		idr = ddi_get32(cpqary3p->idr_handle, cpqary3p->idr);
+		idr = cpqary3_get32(cpq, CISS_I2O_INBOUND_DOORBELL);
 
 		if ((idr & CISS_IDR_BIT_CFGTBL_CHANGE) == 0) {
-			return (CPQARY3_SUCCESS);
+			return (DDI_SUCCESS);
 		}
 
 		/*
@@ -426,13 +425,13 @@ cpqary3_cfgtbl_flush(cpqary3_t *cpqary3p)
 		delay(drv_usectohz(1000000));
 	}
 
-	dev_err(cpqary3p->dip, CE_WARN, "time out expired before controller "
+	dev_err(cpq->dip, CE_WARN, "time out expired before controller "
 	    "configuration completed");
-	return (CPQARY3_FAILURE);
+	return (DDI_FAILURE);
 }
 
 static int
-cpqary3_cfgtbl_transport_has_support(cpqary3_t *cpqary3p, int xport)
+cpqary3_cfgtbl_transport_has_support(cpqary3_t *cpq, int xport)
 {
 	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
 	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
@@ -441,35 +440,35 @@ cpqary3_cfgtbl_transport_has_support(cpqary3_t *cpqary3p, int xport)
 	 * Read the current value of the TransportSupport field in the
 	 * Configuration Table.
 	 */
-	uint32_t xport_active = ddi_get32(cpqary3p->ct_handle,
-	    &cpqary3p->ct->TransportSupport);
+	uint32_t xport_active = ddi_get32(cpq->cpq_ct_handle,
+	    &cpq->cpq_ct->TransportSupport);
 
 	/*
 	 * Check that the desired transport method is supported by the
 	 * controller:
 	 */
 	if ((xport_active & xport) == 0) {
-		dev_err(cpqary3p->dip, CE_WARN, "controller does not support "
+		dev_err(cpq->dip, CE_WARN, "controller does not support "
 		    "method \"%s\"", xport == CISS_CFGTBL_XPORT_SIMPLE ?
 		    "simple" : "performant");
-		return (CPQARY3_FAILURE);
+		return (DDI_FAILURE);
 	}
 
-	return (CPQARY3_SUCCESS);
+	return (DDI_SUCCESS);
 }
 
 static void
-cpqary3_cfgtbl_transport_set(cpqary3_t *cpqary3p, int xport)
+cpqary3_cfgtbl_transport_set(cpqary3_t *cpq, int xport)
 {
 	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
 	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
 
-	ddi_put32(cpqary3p->ct_handle,
-	    &cpqary3p->ct->HostWrite.TransportRequest, xport);
+	ddi_put32(cpq->cpq_ct_handle,
+	    &cpq->cpq_ct->HostWrite.TransportRequest, xport);
 }
 
 static int
-cpqary3_cfgtbl_transport_confirm(cpqary3_t *cpqary3p, int xport)
+cpqary3_cfgtbl_transport_confirm(cpqary3_t *cpq, int xport)
 {
 	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
 	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
@@ -478,52 +477,52 @@ cpqary3_cfgtbl_transport_confirm(cpqary3_t *cpqary3p, int xport)
 	 * Read the current value of the TransportActive field in the
 	 * Configuration Table.
 	 */
-	uint32_t xport_active = ddi_get32(cpqary3p->ct_handle,
-	    &cpqary3p->ct->TransportActive);
+	uint32_t xport_active = ddi_get32(cpq->cpq_ct_handle,
+	    &cpq->cpq_ct->TransportActive);
 
 	/*
 	 * Check that the desired transport method is now active:
 	 */
 	if ((xport_active & xport) == 0) {
-		dev_err(cpqary3p->dip, CE_WARN, "failed to enable transport "
+		dev_err(cpq->dip, CE_WARN, "failed to enable transport "
 		    "method \"%s\"", xport == CISS_CFGTBL_XPORT_SIMPLE ?
 		    "simple" : "performant");
-		return (CPQARY3_FAILURE);
+		return (DDI_FAILURE);
 	}
 
 	/*
 	 * Ensure that the controller is now ready to accept commands.
 	 */
 	if ((xport_active & CISS_CFGTBL_READY_FOR_COMMANDS) == 0) {
-		dev_err(cpqary3p->dip, CE_WARN, "controller not ready to "
+		dev_err(cpq->dip, CE_WARN, "controller not ready to "
 		    "accept commands");
-		return (CPQARY3_FAILURE);
+		return (DDI_FAILURE);
 	}
 
-	return (CPQARY3_SUCCESS);
+	return (DDI_SUCCESS);
 }
 
-uint32_t
+static uint32_t
 cpqary3_ctlr_get_cmdsoutmax(cpqary3_t *cpq)
 {
 	uint32_t val;
 
 	if (cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_PERFORMANT) {
-		if ((val = ddi_get32(cpq->ct_handle,
-		    &cpq->ct->MaxPerfModeCmdsOutMax)) != 0) {
+		if ((val = ddi_get32(cpq->cpq_ct_handle,
+		    &cpq->cpq_ct->MaxPerfModeCmdsOutMax)) != 0) {
 			return (val);
 		}
 	}
 
-	return (ddi_get32(cpq->ct_handle, &cpq->ct->CmdsOutMax));
+	return (ddi_get32(cpq->cpq_ct_handle, &cpq->cpq_ct->CmdsOutMax));
 }
 
-uint32_t
+static uint32_t
 cpqary3_ctlr_get_hostdrvsup(cpqary3_t *cpq)
 {
-	if ((!cpq->bddef->bd_is_e200) && (!cpq->bddef->bd_is_ssll)) {
-		uint32_t val = ddi_get32(cpq->ct_handle,
-		    &cpq->ct->HostDrvrSupport);
+	if (!cpq->cpq_board->bd_is_e200 && !cpq->cpq_board->bd_is_ssll) {
+		uint32_t val = ddi_get32(cpq->cpq_ct_handle,
+		    &cpq->cpq_ct->HostDrvrSupport);
 
 		/*
 		 * XXX This is "bit 2" in the "Host Driver Specific Support"
@@ -536,43 +535,57 @@ cpqary3_ctlr_get_hostdrvsup(cpqary3_t *cpq)
 		 */
 		val |= 0x04;
 
-		ddi_put32(cpq->ct_handle, &cpq->ct->HostDrvrSupport, val);
+		ddi_put32(cpq->cpq_ct_handle, &cpq->cpq_ct->HostDrvrSupport,
+		    val);
 	}
 
-	return (ddi_get32(cpq->ct_handle, &cpq->ct->HostDrvrSupport));
+	return (ddi_get32(cpq->cpq_ct_handle, &cpq->cpq_ct->HostDrvrSupport));
 }
 
-int
+static int
 cpqary3_ctlr_init_simple(cpqary3_t *cpq)
 {
 	VERIFY(cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_UNKNOWN);
 
 	if (cpqary3_cfgtbl_transport_has_support(cpq,
-	    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
-		return (ENOTTY);
+	    CISS_CFGTBL_XPORT_SIMPLE) != DDI_SUCCESS) {
+		return (DDI_FAILURE);
 	}
 	cpq->cpq_ctlr_mode = CPQARY3_CTLR_MODE_SIMPLE;
 
-	if ((cpq->ctlr_maxcmds = cpqary3_ctlr_get_cmdsoutmax(cpq)) == 0) {
+	/*
+	 * Disable device interrupts while we are setting up.
+	 */
+	cpqary3_intr_onoff(cpq, CPQARY3_INTR_DISABLE);
+
+	if ((cpq->cpq_maxcmds = cpqary3_ctlr_get_cmdsoutmax(cpq)) == 0) {
 		dev_err(cpq->dip, CE_WARN, "maximum outstanding commands set "
 		    "to zero");
-		return (EPROTO);
+		return (DDI_FAILURE);
 	}
 
-	cpq->sg_cnt = CPQARY3_SG_CNT;
+	/*
+	 * XXX ?
+	 */
+	cpq->cpq_sg_cnt = CPQARY3_SG_CNT;
+
+	/*
+	 * Zero the upper 32 bits of the address in the Controller.
+	 */
+	ddi_put32(cpq->cpq_ct_handle, &cpq->cpq_ct->HostWrite.Upper32Addr, 0);
 
 	/*
 	 * Set the Transport Method and flush the changes to the
 	 * Configuration Table.
 	 */
 	cpqary3_cfgtbl_transport_set(cpq, CISS_CFGTBL_XPORT_SIMPLE);
-	if (cpqary3_cfgtbl_flush(cpq) != CPQARY3_SUCCESS) {
-		return (EPROTO);
+	if (cpqary3_cfgtbl_flush(cpq) != DDI_SUCCESS) {
+		return (DDI_FAILURE);
 	}
 
 	if (cpqary3_cfgtbl_transport_confirm(cpq,
-	    CISS_CFGTBL_XPORT_SIMPLE) != CPQARY3_SUCCESS) {
-		return (EPROTO);
+	    CISS_CFGTBL_XPORT_SIMPLE) != DDI_SUCCESS) {
+		return (DDI_FAILURE);
 	}
 
 	/*
@@ -580,33 +593,28 @@ cpqary3_ctlr_init_simple(cpqary3_t *cpq)
 	 * driver did.
 	 */
 	uint32_t check_again = cpqary3_ctlr_get_cmdsoutmax(cpq);
-	if (check_again != cpq->ctlr_maxcmds) {
+	if (check_again != cpq->cpq_maxcmds) {
 		dev_err(cpq->dip, CE_WARN, "maximum outstanding commands "
 		    "changed during initialisation (was %u, now %u)",
-		    cpq->ctlr_maxcmds, check_again);
-		return (EPROTO);
+		    cpq->cpq_maxcmds, check_again);
+		return (DDI_FAILURE);
 	}
 
-	/*
-	 * Zero the upper 32 bits of the address in the Controller.
-	 */
-	ddi_put32(cpq->ct_handle, &cpq->ct->HostWrite.Upper32Addr, 0);
-
+#if 0
 	/*
 	 * Set the controller interrupt check routine.
 	 */
 	cpq->check_ctlr_intr = cpqary3_check_simple_ctlr_intr;
+#endif
 
-	cpq->host_support = cpqary3_ctlr_get_hostdrvsup(cpq);
-
-	return (0);
+	return (DDI_SUCCESS);
 }
 
 /*
  * XXX
  */
 #if 0
-int
+static int
 cpqary3_ctlr_init_performant(cpqary3_t *cpq)
 {
 	cpqary3_replyq_t *cprq = &cpq->cpq_replyq;
@@ -614,7 +622,7 @@ cpqary3_ctlr_init_performant(cpqary3_t *cpq)
 	VERIFY(cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_UNKNOWN);
 
 	if (cpqary3_cfgtbl_transport_has_support(cpq,
-	    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
+	    CISS_CFGTBL_XPORT_PERFORMANT) != DDI_SUCCESS) {
 		return (ENOTTY);
 	}
 	cpq->cpq_ctlr_mode = CPQARY3_CTLR_MODE_PERFORMANT;
@@ -688,12 +696,12 @@ cpqary3_ctlr_init_performant(cpqary3_t *cpq)
 	 * Configuration Table.
 	 */
 	cpqary3_cfgtbl_transport_set(cpq, CISS_CFGTBL_XPORT_PERFORMANT);
-	if (cpqary3_cfgtbl_flush(cpq) != CPQARY3_SUCCESS) {
+	if (cpqary3_cfgtbl_flush(cpq) != DDI_SUCCESS) {
 		return (EPROTO);
 	}
 
 	if (cpqary3_cfgtbl_transport_confirm(cpq,
-	    CISS_CFGTBL_XPORT_PERFORMANT) != CPQARY3_SUCCESS) {
+	    CISS_CFGTBL_XPORT_PERFORMANT) != DDI_SUCCESS) {
 		return (EPROTO);
 	}
 
@@ -750,45 +758,19 @@ cpqary3_ctlr_init_performant(cpqary3_t *cpq)
 
 	DDI_PUT32(cpq, &ctp->HostWrite.Upper32Addr, 0x00000000);
 
-	/* Set the controller interrupt check routine */
-
-	if (cpq->bddef->bd_is_e200) {
-		cpq->check_ctlr_intr = cpqary3_check_perf_e200_intr;
-	} else {
-		cpq->check_ctlr_intr = cpqary3_check_perf_ctlr_intr;
-	}
-
-	cpq->host_support = cpqary3_ctlr_get_hostdrvsup(cpq);
-
 	return (0);
 }
 #endif
 
 int
-cpqary3_ctlr_init(cpqary3_t *cpqary3p)
+cpqary3_ctlr_init(cpqary3_t *cpq)
 {
-	uint8_t				signature[4] = { 'C', 'I', 'S', 'S' };
-	CfgTable_t			*ctp = cpqary3p->ct;
-	cpqary3_phyctg_t		*cpqary3_phyctgp;
-	uint32_t			phy_addr;
-	size_t				cmd_size;
-	uint32_t			queue_depth;
-	uint32_t			CmdsOutMax;
-	uint32_t			BlockFetchCnt[8];
-	caddr_t				replyq_start_addr = NULL;
-	/* SG */
-	uint32_t			max_blk_fetch_cnt = 0;
-	uint32_t			max_sg_cnt = 0;
-	uint32_t			optimal_sg = 0;
-	uint32_t			optimal_sg_size = 0;
-	/* Header + Request + Error */
-	uint32_t			size_of_HRE = 0;
-	uint32_t			size_of_cmdlist = 0;
-	/* SG */
+	uint8_t signature[4] = { 'C', 'I', 'S', 'S' };
+	CfgTable_t *ctp = cpq->cpq_ct;
 	int e;
 
-	if ((e = cpqary3_ctlr_wait_for_state(cpqary3p,
-	    CPQARY3_WAIT_STATE_READY) != 0)) {
+	if ((e = cpqary3_ctlr_wait_for_state(cpq,
+	    CPQARY3_WAIT_STATE_READY) != DDI_SUCCESS)) {
 		return (e);
 	}
 
@@ -798,17 +780,14 @@ cpqary3_ctlr_init(cpqary3_t *cpqary3p)
 	 * See: "9.1 Configuration Table" in CISS Specification.
 	 */
 	for (unsigned i = 0; i < 4; i++) {
-		if (ddi_get8(cpqary3p->ct_handle, &ctp->Signature[i]) !=
+		if (ddi_get8(cpq->cpq_ct_handle, &cpq->cpq_ct->Signature[i]) !=
 		    signature[i]) {
-			dev_err(cpqary3p->dip, CE_WARN, "invalid signature "
+			dev_err(cpq->dip, CE_WARN, "invalid signature "
 			    "detected");
-			return (EPROTO);
+			return (DDI_FAILURE);
 		}
 	}
 
-	/*
-	 * XXX Let's just do Simple mode for now...
-	 */
 #if 0
 	if (!(cpqary3p->bddef->bd_flags & SA_BD_SAS)) {
 		if ((e = cpqary3_ctlr_init_simple(cpqary3p)) != 0) {
@@ -820,18 +799,23 @@ cpqary3_ctlr_init(cpqary3_t *cpqary3p)
 		}
 	}
 #else
-	if ((e = cpqary3_ctlr_init_simple(cpqary3p)) != 0) {
+	/*
+	 * XXX Let's just do Simple mode for now...
+	 */
+	if ((e = cpqary3_ctlr_init_simple(cpq)) != 0) {
 		return (e);
 	}
 #endif
+
+	cpq->cpq_host_support = cpqary3_ctlr_get_hostdrvsup(cpq);
 
 	/*
 	 * Read initial controller heartbeat value and mark the current
 	 * reading time.
 	 */
-	cpqary3p->cpq_last_heartbeat = ddi_get32(cpqary3p->ct_handle,
-	    &ctp->HeartBeat);
-	cpqary3p->cpq_last_heartbeat_lbolt = ddi_get_lbolt();
+	cpq->cpq_last_heartbeat = ddi_get32(cpq->cpq_ct_handle,
+	    &cpq->cpq_ct->HeartBeat);
+	cpq->cpq_last_heartbeat_lbolt = ddi_get_lbolt();
 
 	return (0);
 }
@@ -852,18 +836,18 @@ cpqary3_ctlr_wait_for_state(cpqary3_t *cpq, cpqary3_wait_state_t state)
 	 * seconds, give up.
 	 */
 	for (unsigned i = 0; i < CPQARY3_WAIT_DELAY_SECONDS; i++) {
-		uint32_t spr = ddi_get32(cpq->spr0_handle, cpq->spr0);
+		uint32_t spr = cpqary3_get32(cpq, CISS_I2O_SCRATCHPAD);
 
 		switch (state) {
 		case CPQARY3_WAIT_STATE_READY:
 			if (spr == CISS_SCRATCHPAD_INITIALISED) {
-				return (0);
+				return (DDI_SUCCESS);
 			}
 			break;
 
 		case CPQARY3_WAIT_STATE_UNREADY:
 			if (spr != CISS_SCRATCHPAD_INITIALISED) {
-				return (0);
+				return (DDI_SUCCESS);
 			}
 			break;
 		}
@@ -877,5 +861,5 @@ cpqary3_ctlr_wait_for_state(cpqary3_t *cpq, cpqary3_wait_state_t state)
 	dev_err(cpq->dip, CE_WARN, "time out waiting for controller "
 	    "to enter state \"%s\"", state == CPQARY3_WAIT_STATE_READY ?
 	    "ready": "unready");
-	return (ETIMEDOUT);
+	return (DDI_FAILURE);
 }
