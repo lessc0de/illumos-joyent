@@ -447,6 +447,7 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	}
 
 	switch (cmd) {
+#if 0
 	case CPQARY3_IOCTL_BMIC_PASS:
 		status = *rval = cpqary3_ioctl_bmic_pass(arg, cpq, mode);
 		break;
@@ -454,6 +455,7 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	case CPQARY3_IOCTL_SCSI_PASS:
 		status = *rval = cpqary3_ioctl_scsi_pass(arg, cpq, mode);
 		break;
+#endif
 
 	default:
 		status = scsi_hba_ioctl(dev, cmd, arg, mode, credp, rval);
