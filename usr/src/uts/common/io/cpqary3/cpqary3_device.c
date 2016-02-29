@@ -36,7 +36,7 @@ cpqary3_locate_bar(cpqary3_t *cpq, pci_regspec_t *regs, unsigned nregs,
 		unsigned type = regs[i].pci_phys_hi & PCI_ADDR_MASK;
 		unsigned bar = PCI_REG_REG_G(regs[i].pci_phys_hi);
 
-		if (type == PCI_ADDR_MEM32) {
+		if (type == PCI_ADDR_MEM32 || type == PCI_ADDR_MEM64) {
 			dev_err(cpq->dip, CE_WARN, "reg[%u]: bar found: %x",
 			    i, bar);
 			*i2o_bar = i;
@@ -82,7 +82,11 @@ cpqary3_locate_cfgtbl(cpqary3_t *cpq, pci_regspec_t *regs, unsigned nregs,
 		unsigned type = regs[i].pci_phys_hi & PCI_ADDR_MASK;
 		unsigned bar = PCI_REG_REG_G(regs[i].pci_phys_hi);
 
-		if (type == want_type && bar == want_bar) {
+		if (type != PCI_ADDR_MEM32 && type != PCI_ADDR_MEM64) {
+			continue;
+		}
+
+		if (bar == want_bar) {
 			dev_err(cpq->dip, CE_WARN, "reg[%u]: bar found: %x",
 			    i, bar);
 
