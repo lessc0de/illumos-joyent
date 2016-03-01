@@ -2150,10 +2150,16 @@ DR_SAS_OBJS = dr_sas.o
 #	CPQARY3 module
 #
 # XXX disabled cpqary3_noe.o cpqary3_ioctl.o
-CPQARY3_OBJS =	cpqary3.o cpqary3_talk2ctlr.o	\
-		cpqary3_isr.o cpqary3_transport.o cpqary3_mem.o	\
+CPQARY3_OBJS =	cpqary3.o \
+		cpqary3_transport.o cpqary3_mem.o	\
 		cpqary3_scsi.o cpqary3_util.o	\
-		cpqary3_bd.o cpqary3_device.o cpqary3_interrupts.o
+		cpqary3_bd.o \
+		cpqary3_device.o \
+		cpqary3_interrupts.o \
+		cpqary3_commands.o \
+		cpqary3_ciss_simple.o \
+		cpqary3_ciss_performant.o \
+		cpqary3_ciss.o
 
 #
 #	ISCSI_INITIATOR module

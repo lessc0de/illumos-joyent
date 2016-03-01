@@ -285,14 +285,16 @@ cpqary3_ioctl_fil_bmic(CommandList_t *cmdlist,
 		break;
 	}
 
-	cmdlist ->Request.CDB[0] =
-	    (bmic_pass->io_direction == CPQARY3_SCSI_IN) ? 0x26: 0x27;
+	if (bmic_pass->io_direction == CPQARY3_SCSI_IN) {
+		cmdlist->Request.CDB[0] = CISS_SCMD_ARRAY_READ;
+	} else {
+		cmdlist->Request.CDB[0] = CISS_SCMD_ARRAY_WRITE;
+	}
 	cmdlist ->Request.CDB[1] = bmic_pass->unit_number; /* Unit Number */
 
 	/*
 	 * BMIC Detail - bytes 2[MSB] to 5[LSB]
 	 */
-
 	cmdlist->Request.CDB[2] = (bmic_pass->blk_number >> 24) & 0xff;
 	cmdlist->Request.CDB[3] = (bmic_pass->blk_number >> 16) & 0xff;
 	cmdlist->Request.CDB[4] = (bmic_pass->blk_number >> 8) & 0xff;
@@ -300,16 +302,16 @@ cpqary3_ioctl_fil_bmic(CommandList_t *cmdlist,
 
 	cmdlist->Request.CDB[6] = bmic_pass->cmd; /* BMIC Command */
 
-	/* Transfer Length - bytes 7[MSB] to 8[LSB] */
-
+	/*
+	 * Transfer Length - bytes 7[MSB] to 8[LSB]
+	 */
 	cmdlist->Request.CDB[7] = (bmic_pass->buf_len >> 8) & 0xff;
 	cmdlist->Request.CDB[8] = bmic_pass->buf_len & 0xff;
 	cmdlist->Request.CDB[9] = 0x00; /* Reserved */
 
 	/*
-	 * Copy the Lun address from the request
+	 * Copy the LUN address from the request
 	 */
-
 	bcopy(&bmic_pass->lun_addr[0], &(cmdlist->Header.LUN),
 	    sizeof (LUNAddr_t));
 	cmdlist->SG[0].Len = bmic_pass->buf_len;

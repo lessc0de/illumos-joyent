@@ -20,8 +20,6 @@
  * Local Functions Definitions
  */
 
-uint8_t cpqary3_format_unit(cpqary3_cmdpvt_t *);
-
 static uint8_t cpqary3_probe4LVs(cpqary3_t *);
 static uint8_t cpqary3_probe4Tapes(cpqary3_t *);
 
@@ -239,30 +237,11 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
 
 }
 
-
-/*
- * Function	: 	cpqary3_fulsh_cache
- * Description	: 	This routine flushes the controller cache.
- * Called By	: 	cpqary3_detach(), cpqary3_additional_cmd()
- * Parameters	: 	per controller
- * Calls	:  	cpqary3_synccmd_alloc(), cpqary3_synccmd_send()
- *			cpqary3_synccmd_free()
- * Return Values:	None
- */
 int
 cpqary3_flush_cache(cpqary3_t *cpqary3p)
 {
 	cpqary3_command_t *cpcm;
 	CommandList_t *cmdlistp;
-
-	/*
-	 * Occupy the Command List
-	 * Allocate Physically Contigous Memory for the FLUSH CACHE buffer
-	 * Update the Command List accordingly
-	 * Submit the command and wait for a signal
-	 */
-
-	ASSERT(cpqary3p != NULL);
 
 	/* grab a command and allocate a dma buffer */
 	if ((cpcm = cpqary3_synccmd_alloc(cpqary3p,
@@ -282,11 +261,9 @@ cpqary3_flush_cache(cpqary3_t *cpqary3p)
 	cmdlistp->Request.Type.Attribute = CISS_ATTR_HEADOFQUEUE;
 	cmdlistp->Request.Type.Direction = CISS_XFER_WRITE;
 	cmdlistp->Request.Timeout = CISS_NO_TIMEOUT;
-	cmdlistp->Request.CDB[0] = ARRAY_WRITE;
-	cmdlistp->Request.CDB[6] = CISS_FLUSH_CACHE; /* 0xC2 */
+	cmdlistp->Request.CDB[0] = CISS_SCMD_ARRAY_WRITE;
+	cmdlistp->Request.CDB[6] = BMIC_FLUSH_CACHE;
 	cmdlistp->Request.CDB[8] = 0x02;
-
-	cpcm->cpcm_complete = cpqary3_synccmd_complete;
 
 	if (cpqary3_synccmd_send(cpqary3p, cpcm, 90000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
@@ -543,8 +520,6 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	DTRACE_PROBE2(tape_probe_cmd_send,
 	    CommandList_t *, cmdlistp, cpqary3_command_t *, cpcm);
 
-	cpcm->cpcm_complete = cpqary3_synccmd_complete;
-
 	if (cpqary3_synccmd_send(cpqary3p, cpcm, 90000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
 		cpqary3_synccmd_free(cpqary3p, cpcm);
@@ -662,13 +637,6 @@ cpqary3_synccmd_complete(cpqary3_command_t *cpcm)
 
 	case CPQARY3_SYNCCMD_STATUS_SUBMITTED:
 		cpcm->cpcm_synccmd_status = CPQARY3_SYNCCMD_STATUS_NONE;
-
-		/*
-		 * Fix for Flush Cache Operation Timed out issue:
-		 * cv_signal() wakes up only one blocked thread.
-		 * We need to use cv_broadcast which unblocks
-		 * all the blocked threads()
-		 */
 		cv_broadcast(&cpq->cv_ioctl_wait);
 		return;
 

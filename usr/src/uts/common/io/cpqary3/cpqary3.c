@@ -300,8 +300,8 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	/*
 	 * Allocate HBA transport structure
 	 */
-	if ((cpq->hba_tran = scsi_hba_tran_alloc(dip, SCSI_HBA_CANSLEEP)) ==
-	    NULL) {
+	if ((cpq->cpq_hba_tran = scsi_hba_tran_alloc(dip,
+	    SCSI_HBA_CANSLEEP)) == NULL) {
 		dev_err(dip, CE_WARN, "scsi_hba_tran_alloc failed");
 		cpqary3_cleanup(cpq);
 		return (DDI_FAILURE);
@@ -322,7 +322,7 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	 * Register the DMA attributes and the transport vectors
 	 * of each instance of the  HBA device.
 	 */
-	if (scsi_hba_attach_setup(dip, &tmp_dma_attr, cpq->hba_tran,
+	if (scsi_hba_attach_setup(dip, &tmp_dma_attr, cpq->cpq_hba_tran,
 	    SCSI_HBA_TRAN_CLONE) == DDI_FAILURE) {
 		dev_err(dip, CE_WARN, "scsi_hba_attach_setup failed");
 		cpqary3_cleanup(cpq);
@@ -474,13 +474,11 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
  * Return Values: 	None
  */
 static void
-cpqary3_cleanup(cpqary3_t *cpqary3p)
+cpqary3_cleanup(cpqary3_t *cpq)
 {
 	int8_t		node_name[10];
 	clock_t		cpqary3_lbolt;
 	uint32_t	targ;
-
-	ASSERT(cpqary3p != NULL);
 
 	/*
 	 * Disable the NOE command
@@ -498,76 +496,76 @@ cpqary3_cleanup(cpqary3_t *cpqary3p)
 	 */
 
 	if (status & CPQARY3_NOE_INIT_DONE) {
-		if (CPQARY3_SUCCESS == cpqary3_disable_NOE_command(cpqary3p)) {
-			mutex_enter(&cpqary3p->hw_mutex);
+		if (CPQARY3_SUCCESS == cpqary3_disable_NOE_command(cpq)) {
+			mutex_enter(&cpq->hw_mutex);
 			cpqary3_lbolt = ddi_get_lbolt();
 			if (DDI_FAILURE ==
-			    cv_timedwait_sig(&cpqary3p->cv_noe_wait,
-			    &cpqary3p->hw_mutex,
+			    cv_timedwait_sig(&cpq->cv_noe_wait,
+			    &cpq->hw_mutex,
 			    cpqary3_lbolt + drv_usectohz(3000000))) {
 				cmn_err(CE_NOTE,
 				    "CPQary3: Resume signal for disable NOE "
 				    "command not received \n");
 			}
-			mutex_exit(&cpqary3p->hw_mutex);
+			mutex_exit(&cpq->hw_mutex);
 		}
 	}
 #endif
 
-	cpqary3_interrupts_teardown(cpqary3p);
+	cpqary3_interrupts_teardown(cpq);
 
-	if (cpqary3p->cpq_init_level & CPQARY3_INITLEVEL_PERIODIC) {
-		ddi_periodic_delete(cpqary3p->cpq_periodic);
-		cpqary3p->cpq_init_level &= ~CPQARY3_INITLEVEL_PERIODIC;
+	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_PERIODIC) {
+		ddi_periodic_delete(cpq->cpq_periodic);
+		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_PERIODIC;
 	}
 
-	if (cpqary3p->cpq_init_level & CPQARY3_INITLEVEL_MINOR_NODE) {
+	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_MINOR_NODE) {
 		(void) sprintf(node_name, "cpqary3%d",
-		ddi_get_instance(cpqary3p->dip));
-		ddi_remove_minor_node(cpqary3p->dip, node_name);
-		cpqary3p->cpq_init_level &= ~CPQARY3_INITLEVEL_MINOR_NODE;
+		ddi_get_instance(cpq->dip));
+		ddi_remove_minor_node(cpq->dip, node_name);
+		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_MINOR_NODE;
 	}
 
-	if (cpqary3p->cpq_init_level & CPQARY3_INITLEVEL_HBA_ATTACH) {
-		(void) scsi_hba_detach(cpqary3p->dip);
-		cpqary3p->cpq_init_level &= ~CPQARY3_INITLEVEL_HBA_ATTACH;
+	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_HBA_ATTACH) {
+		(void) scsi_hba_detach(cpq->dip);
+		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_HBA_ATTACH;
 	}
 
-	if (cpqary3p->cpq_init_level & CPQARY3_INITLEVEL_HBA_ALLOC) {
-		scsi_hba_tran_free(cpqary3p->hba_tran);
-		cpqary3p->cpq_init_level &= ~CPQARY3_INITLEVEL_HBA_ALLOC;
+	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_HBA_ALLOC) {
+		scsi_hba_tran_free(cpq->cpq_hba_tran);
+		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_HBA_ALLOC;
 	}
 
-	if (cpqary3p->cpq_init_level & CPQARY3_INITLEVEL_BASIC) {
-		mutex_enter(&cpqary3p->hw_mutex);
+	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_BASIC) {
+		mutex_enter(&cpq->hw_mutex);
 
-		cv_destroy(&cpqary3p->cv_abort_wait);
-		cv_destroy(&cpqary3p->cv_flushcache_wait);
-		cv_destroy(&cpqary3p->cv_noe_wait);
-		cv_destroy(&cpqary3p->cv_immediate_wait);
-		cv_destroy(&cpqary3p->cv_ioctl_wait);
+		cv_destroy(&cpq->cv_abort_wait);
+		cv_destroy(&cpq->cv_flushcache_wait);
+		cv_destroy(&cpq->cv_noe_wait);
+		cv_destroy(&cpq->cv_immediate_wait);
+		cv_destroy(&cpq->cv_ioctl_wait);
 
 		for (targ = 0; targ < CPQARY3_MAX_TGT;  targ++) {
-			if (cpqary3p->cpqary3_tgtp[targ] == NULL)
+			if (cpq->cpqary3_tgtp[targ] == NULL)
 				continue;
-			kmem_free(cpqary3p->cpqary3_tgtp[targ],
+			kmem_free(cpq->cpqary3_tgtp[targ],
 			    sizeof (cpqary3_tgt_t));
-			cpqary3p->cpqary3_tgtp[targ] = NULL;
+			cpq->cpqary3_tgtp[targ] = NULL;
 		}
 
-		mutex_exit(&cpqary3p->hw_mutex);
+		mutex_exit(&cpq->hw_mutex);
 
 		/*
 		 * XXX avl_destroy, list_destroy, etc
 		 */
-		cpqary3p->cpq_init_level &= ~CPQARY3_INITLEVEL_BASIC;
+		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_BASIC;
 	}
 
-	cpqary3_device_teardown(cpqary3p);
+	cpqary3_device_teardown(cpq);
 
-	VERIFY0(cpqary3p->cpq_init_level);
+	VERIFY0(cpq->cpq_init_level);
 
-	ddi_soft_state_free(cpqary3_state, ddi_get_instance(cpqary3p->dip));
+	ddi_soft_state_free(cpqary3_state, ddi_get_instance(cpq->dip));
 }
 
 static int

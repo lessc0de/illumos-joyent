@@ -188,12 +188,10 @@ cpqary3_synccmd_alloc(cpqary3_t *cpq, size_t bufsz)
 {
 	cpqary3_command_t *cpcm;
 
-	if ((cpcm = cpqary3_command_alloc(cpq)) == NULL) {
+	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_SYNCCMD)) ==
+	    NULL) {
 		return (NULL);
 	}
-
-	cpcm->cpcm_type = CPQARY3_CMDTYPE_SYNCCMD;
-	cpcm->cpcm_complete = cpqary3_synccmd_complete;
 
 	if (bufsz == 0) {
 		return (cpcm);
@@ -407,15 +405,14 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 	cmdlistp = cpcm->cpcm_va_cmd;
 	idlogdrive = cpcm->cpcm_internal->cpcmi_va;
 
-	/* Cmd Reques */
 	cmdlistp->Request.CDBLen = CPQARY3_CDBLEN_16;
-	cmdlistp->Request.CDB[0] = 0x26;
-	cmdlistp->Request.CDB[6] = BMIC_IDENTIFY_LOGICAL_DRIVE;
-	cmdlistp->Request.CDB[7] = (sizeof (IdLogDrive) >> 8) & 0xff;
-	cmdlistp->Request.CDB[8] = sizeof (IdLogDrive) & 0xff;
 	cmdlistp->Request.Type.Type = CISS_TYPE_CMD;
 	cmdlistp->Request.Type.Attribute = CISS_ATTR_HEADOFQUEUE;
 	cmdlistp->Request.Type.Direction = CISS_XFER_READ;
+	cmdlistp->Request.CDB[0] = CISS_SCMD_ARRAY_READ;
+	cmdlistp->Request.CDB[6] = BMIC_IDENTIFY_LOGICAL_DRIVE;
+	cmdlistp->Request.CDB[7] = (sizeof (IdLogDrive) >> 8) & 0xff;
+	cmdlistp->Request.CDB[8] = sizeof (IdLogDrive) & 0xff;
 
 	/*
 	 * For all the Targets that exist, issue an IDENTIFY LOGICAL DRIVE.
@@ -460,8 +457,6 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 		    (cmdlistp->Header.LUN.PhysDev.Bus > 0) ?
 		    MASK_PERIPHERIAL_DEV_ADDR :	PERIPHERIAL_DEV_ADDR;
 
-		cpcm->cpcm_complete = cpqary3_synccmd_complete;
-
 		/*
 		 * Submit the command
 		 * Poll for its completion
@@ -470,6 +465,8 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 		 * Return FAILURE (No point in continuing if h/w is
 		 * faulty !!!)
 		 */
+
+		cpqary3_command_reuse(cpcm);
 
 		if (cpqary3_synccmd_send(ctlr, cpcm, 90000,
 		    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {

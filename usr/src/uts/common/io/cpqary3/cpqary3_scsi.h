@@ -25,26 +25,34 @@ extern "C" {
 
 /* CISS LUN Addressing MODEs */
 #define	PERIPHERIAL_DEV_ADDR 			0x0
-#define	LOGICAL_VOL_ADDR 				0x1
+#define	LOGICAL_VOL_ADDR 			0x1
 #define	MASK_PERIPHERIAL_DEV_ADDR 		0x3
-#define	CISS_PHYS_MODE 					0x0
+#define	CISS_PHYS_MODE 				0x0
 
 /*
  * Definitions for compatibility with the old array BMIC interface
  * CISS_OPCODE_RLL IS THE OPCODE FOR THE Report Logical Luns command
  */
-#define	ARRAY_READ				0x26
-#define	ARRAY_WRITE				0x27
+#define	CISS_SCMD_ARRAY_READ			0x26
+#define	CISS_SCMD_ARRAY_WRITE			0x27
+
 #define	CISS_NEW_READ				0xC0
 #define	CISS_NEW_WRITE				0xC1
 #define	CISS_OPCODE_RLL				0xC2
 #define	CISS_OPCODE_RPL				0xC3
-#define	CISS_NO_TIMEOUT				0x0
+#define	CISS_NO_TIMEOUT				0x00
 
 /*
- * BMIC commands
+ * BMIC Commands
+ *
+ * These commands are generally not documented in the OpenCISS specification,
+ * but _do_ appear in "Compaq Host-Based PCI Array Controller Firmware
+ * Specification" (March 1999).
+ *
+ * These commands are generally sent to the controller LUN via
+ * CISS_SCMD_ARRAY_WRITE in a command CDB.
  */
-#define	CISS_FLUSH_CACHE			0xC2
+#define	BMIC_FLUSH_CACHE			0xC2
 #define	BMIC_IDENTIFY_LOGICAL_DRIVE		0x10
 #define	BMIC_SENSE_LOGICAL_DRIVE_STATUS		0x12
 
@@ -153,7 +161,6 @@ typedef struct rpl_data {
 /*
  * Format of the data returned for the IDENTIFY LOGICAL DRIVE Command
  */
-
 typedef struct Identify_Logical_Drive {
 	uint16_t	block_size_in_bytes;
 	uint32_t	blocks_available;
@@ -171,7 +178,6 @@ typedef struct Identify_Logical_Drive {
 	uint8_t		reserved3[418];
 } IdLogDrive;
 
-/* FORMAT */
 typedef struct Identify_Ld_Status {
 	uint8_t		status;			/* Logical Drive Status */
 	uint32_t	failure_map;		/* Drive Failure Map */
@@ -206,25 +212,6 @@ typedef struct Identify_Ld_Status {
 	uint8_t		big_drive_rebuild;	/* Drive Rebuilding - Drive # */
 	uint8_t		reserved[36];
 } SenseLdStatus;
-/* FORMAT */
-
-/*
- * SCSI Command Opcodes
- */
-#define	SCSI_READ_6		0x08	/* READ  - 6  byte command */
-#define	SCSI_READ_10		0x28	/* READ  - 10 byte command */
-#define	SCSI_READ_12		0xA8	/* READ  - 12 byte command */
-#define	SCSI_WRITE_6		0x0A	/* WRITE - 6  byte command */
-#define	SCSI_WRITE_10		0x2A	/* WRITE - 10 byte command */
-#define	SCSI_WRITE_12		0xAA	/* WRITE - 12 byte command */
-
-/*
- * SCSI Opcodes Not supported by FW
- *
- */
-#define	SCSI_LOG_SENSE			0x4D	/* LOG SENSE */
-#define	SCSI_MODE_SELECT		0x15	/* LOG SENSE */
-#define	SCSI_PERSISTENT_RESERVE_IN	0x5E	/* PERSISTENT RESERVE IN */
 
 #pragma pack()
 

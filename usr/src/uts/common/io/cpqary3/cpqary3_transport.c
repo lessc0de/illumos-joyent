@@ -24,7 +24,7 @@
 static int cpqary3_tgt_init(dev_info_t *, dev_info_t *, scsi_hba_tran_t *,
     struct scsi_device *);
 static int cpqary3_tgt_probe(struct scsi_device *, int (*)());
-static int cpqary3_transport(struct scsi_address *, struct scsi_pkt *);
+static int cpqary3_tran_start(struct scsi_address *, struct scsi_pkt *);
 static int cpqary3_reset(struct scsi_address *, int);
 static int cpqary3_abort(struct scsi_address *, struct scsi_pkt *);
 static int cpqary3_getcap(struct scsi_address *, char *, int);
@@ -41,8 +41,7 @@ static struct scsi_pkt *cpqary3_init_pkt(struct scsi_address *,
     struct scsi_pkt *, struct buf *, int, int, int, int, int (*callback)(),
     caddr_t);
 static int cpqary3_additional_cmd(struct scsi_pkt *scsi_pktp, cpqary3_t *);
-void cpqary3_oscmd_complete(cpqary3_command_t *);
-static uint8_t cpqary3_is_scsi_read_write(struct scsi_pkt *scsi_pktp);
+static boolean_t cpqary3_is_scsi_read_write(struct scsi_pkt *scsi_pktp);
 
 /*
  * External Variable Declarations
@@ -50,30 +49,21 @@ static uint8_t cpqary3_is_scsi_read_write(struct scsi_pkt *scsi_pktp);
 
 extern ddi_dma_attr_t cpqary3_dma_attr;
 
-/*
- * Function	: 	cpqary3_init_hbatran
- * Description	: 	This routine initializes the transport vector in the
- *			SCSA architecture for entry ponts in this driver.
- * Called By	: 	cpqary3_attach()
- * Parameters	: 	per_controller
- * Calls	: 	None
- * Return Values: 	None
- */
 void
-cpqary3_init_hbatran(cpqary3_t *ctlr)
+cpqary3_init_hbatran(cpqary3_t *cpq)
 {
 	scsi_hba_tran_t	*hba_tran;
 
 	ASSERT(ctlr != NULL);
 
-	hba_tran = ctlr->hba_tran;
+	hba_tran = cpq->cpq_hba_tran;
 
 	/*
 	 * Memory for the transport vector has been allocated by now.
 	 * initialize all the entry points in this vector
 	 */
 
-	hba_tran->tran_hba_private = (void *)ctlr;
+	hba_tran->tran_hba_private = cpq;
 
 	/* Target Driver Instance Initialization */
 	hba_tran->tran_tgt_init = cpqary3_tgt_init;
@@ -86,7 +76,7 @@ cpqary3_init_hbatran(cpqary3_t *ctlr)
 	hba_tran->tran_dmafree = cpqary3_dmafree;
 
 	/* Command Transport */
-	hba_tran->tran_start = cpqary3_transport;
+	hba_tran->tran_start = cpqary3_tran_start;
 
 	/* Capability Management */
 	hba_tran->tran_getcap = cpqary3_getcap;
@@ -97,17 +87,6 @@ cpqary3_init_hbatran(cpqary3_t *ctlr)
 	hba_tran->tran_abort = cpqary3_abort;
 }
 
-/*
- * Function	:	cpqary3_tgt_init ()
- * Description	: 	This routine validates the target ID.
- * Called By	:  	cpqary3_init_hbatran()
- * Parameters	: 	HBA-instance, target instance, transport vector,
- *			scsi-device structure
- * Calls	:  	cpqary3_detect_target_geometry(),
- *			cpqary3_probe4targets()
- * Return Values: 	DDI_SUCCESS : A Target exists at this ID.
- *			DDI_FAILURE : No such target exists.
- */
 /* ARGSUSED */
 static int
 cpqary3_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
@@ -164,14 +143,6 @@ cpqary3_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	return (DDI_SUCCESS);
 }
 
-/*
- * Function	:	cpqary3_tgt_probe()
- * Description	: 	This routine probes into the Target Details.
- * Called By	:  	cpqary3_init_hbatran()
- * Parameters	: 	scsi-device structure, calling function if any
- * Calls	: 	None
- * Return Values: 	value returned by scsi_hba_probe()
- */
 static int
 cpqary3_tgt_probe(struct scsi_device *sd, int (*waitfunc)())
 {
@@ -181,7 +152,6 @@ cpqary3_tgt_probe(struct scsi_device *sd, int (*waitfunc)())
 	 * driver
 	 */
 
-	/* HPQacucli Changes */
 	extern int8_t		cpqary3_detect_target_geometry(cpqary3_t *);
 	struct scsi_hba_tran	*hba_tran = sd->sd_address.a_hba_tran;
 	cpqary3_t		*ctlr = hba_tran->tran_hba_private;
@@ -190,7 +160,6 @@ cpqary3_tgt_probe(struct scsi_device *sd, int (*waitfunc)())
 	    (ctlr->cpq_ntargets > 0)) {
 		(void) cpqary3_detect_target_geometry(ctlr);
 	}
-	/* HPQacucli Changes */
 
 	return (scsi_hba_probe(sd, waitfunc));
 }
@@ -543,83 +512,127 @@ cpqary3_dma_move(struct scsi_pkt *scsi_pktp, struct buf *bp,
 
 }
 
-/*
- * Function	:	cpqary3_transport()
- * Description	: 	This routine services requests from the OS that are
- *			directed towards the targets.(any SCSI command)
- * Called By	: 	kernel
- * Parameters	: 	SCSI address, SCSI packet, buffer
- * Calls	: 	cpqary3_build_iop, cpqary3_add2submitted
- * Return Values: 	TRAN_ACCEPT	: The driver accepts the command.
- *			TRAN_BUSY	: Required resources not available
- *					at the moment.
- *			TRAN_FATAL_ERROR: A target no longer exists.
- */
-static int
-cpqary3_transport(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
+static void
+cpqary3_set_arq_data(struct scsi_pkt *pkt, uchar_t key)
 {
-	cpqary3_t		*ctlr;
-	cpqary3_pkt_t		*cpqary3_pktp;
-	cpqary3_tgt_t		*tgtp;
+	struct scsi_arq_status *arqstat;
+
+	arqstat = (struct scsi_arq_status *)(pkt->pkt_scbp);
+
+	arqstat->sts_status.sts_chk = 1; /* CHECK CONDITION */
+	arqstat->sts_rqpkt_reason = CMD_CMPLT;
+	arqstat->sts_rqpkt_resid = 0;
+	arqstat->sts_rqpkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
+	    STATE_SENT_CMD | STATE_XFERRED_DATA;
+	arqstat->sts_rqpkt_statistics = 0;
+	arqstat->sts_sensedata.es_valid = 1;
+	arqstat->sts_sensedata.es_class = CLASS_EXTENDED_SENSE;
+	arqstat->sts_sensedata.es_key = key;
+
+	pkt->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
+	    STATE_SENT_CMD | STATE_XFERRED_DATA;
+}
+
+static int
+cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
+{
+	cpqary3_t *cpq = SA2CTLR(sa);
+	cpqary3_pkt_t *privp = PKT2PVTPKT(scsi_pktp);
+	cpqary3_tgt_t *tgtp;
 	cpqary3_command_t *cpcm;
 	int r;
-
-	ASSERT(sa != NULL);
-	ctlr = SA2CTLR(sa);
-	cpqary3_pktp = PKT2PVTPKT(scsi_pktp);
-	tgtp = ctlr->cpqary3_tgtp[SA2TGT(sa)];
-
-	if (!tgtp)
-		return (TRAN_FATAL_ERROR);
-
-	if (tgtp->type == CPQARY3_TARGET_NONE)
-		return (TRAN_FATAL_ERROR);
-
-	if (cpqary3_additional_cmd(scsi_pktp, ctlr))
-		return (TRAN_ACCEPT);
+	boolean_t nointr = (scsi_pktp->pkt_flags & FLAG_NOINTR) != 0;
 
 	/*
-	 * Attempt to occupy a free command memory block
-	 * If not successful, return TRAN_BUSY
-	 * Else, build the Command
-	 * Submit it to the controller
-	 * If NO_INTR flag is set, wait for the completion of the command and
-	 * when the command completes, update packet values appropriately and
-	 * return TRAN_ACCEPT.
-	 * Make an entry in the submitted Q
-	 * return TRAN_ACCEPT
+	 * Determine the target to which this command is addressed.
 	 */
-
-	if ((cpcm = cpqary3_command_alloc(ctlr)) == NULL) {
-		return (TRAN_BUSY);
+	if (SA2TGT(sa) >= CPQARY3_MAX_TGT ||
+	    (tgtp = cpq->cpqary3_tgtp[SA2TGT(sa)]) == NULL ||
+	    tgtp->type == CPQARY3_TARGET_NONE) {
+		/*
+		 * This target does not exist.
+		 */
+		return (TRAN_FATAL_ERROR);
 	}
 
-	cpcm->cpcm_type = CPQARY3_CMDTYPE_OS;
-	cpqary3_pktp->cmd_command = cpcm;
-	cpcm->cpcm_private = cpqary3_pktp;
+	/*
+	 * Check to see if we need any special handling for this SCSI
+	 * command.
+	 */
+	switch (scsi_pktp->pkt_cdbp[0]) {
+	case SCMD_FORMAT:
+	case SCMD_LOG_SENSE_G1:
+	case SCMD_MODE_SELECT:
+	case SCMD_PERSISTENT_RESERVE_IN:
+		/*
+		 * These SCSI commands are allegedly not supported by the
+		 * controller firmware.
+		 */
+		cpqary3_set_arq_data(scsi_pktp, KEY_ILLEGAL_REQUEST);
+		if (!nointr) {
+			(*scsi_pktp->pkt_comp)(scsi_pktp);
+		}
+		return (TRAN_ACCEPT);
 
-	if ((cpqary3_pktp->cmd_flags & DDI_DMA_CONSISTENT) &&
-	    cpqary3_pktp->cmd_dmahandle) {
-		(void) ddi_dma_sync(cpqary3_pktp->cmd_dmahandle, 0, 0,
+	case SCMD_SYNCHRONIZE_CACHE:
+		/*
+		 * Emulate SYNCHRONIZE CACHE with the BMIC Flush Cache
+		 * command.
+		 */
+		if ((r = cpqary3_flush_cache(cpq)) == ENOMEM) {
+			return (TRAN_BUSY);
+		} else if (r != 0) {
+			scsi_pktp->pkt_reason = CMD_TIMEOUT;
+			scsi_pktp->pkt_statistics = STAT_TIMEOUT;
+			scsi_pktp->pkt_state = 0;
+		} else {
+			scsi_pktp->pkt_reason = CMD_CMPLT;
+			scsi_pktp->pkt_statistics = 0;
+			scsi_pktp->pkt_state = STATE_GOT_BUS |
+			    STATE_GOT_TARGET | STATE_SENT_CMD |
+			    STATE_XFERRED_DATA | STATE_GOT_STATUS;
+		}
+		if (!nointr) {
+			(*scsi_pktp->pkt_comp)(scsi_pktp);
+		}
+		return (TRAN_ACCEPT);
+	}
+
+	/*
+	 * Allocate a command object for this transaction:
+	 */
+	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_OS)) == NULL) {
+		/*
+		 * Signal to the framework to back off.
+		 */
+		return (TRAN_BUSY);
+	}
+	cpcm->cpcm_private = privp;
+	privp->cmd_command = cpcm;
+
+	if ((privp->cmd_flags & DDI_DMA_CONSISTENT) && privp->cmd_dmahandle) {
+		(void) ddi_dma_sync(privp->cmd_dmahandle, 0, 0,
 		    DDI_DMA_SYNC_FORDEV);
 	}
 
-	VERIFY(cpqary3_pktp->cmd_cookiecnt <= ctlr->cpq_sg_cnt);
-
-	cpcm->cpcm_complete = cpqary3_oscmd_complete;
+	VERIFY(privp->cmd_cookiecnt <= cpq->cpq_sg_cnt);
 
 	if (cpqary3_build_cmdlist(cpcm, SA2TGT(sa)) != CPQARY3_SUCCESS) {
 		goto fail;
 	}
 
-	if ((scsi_pktp->pkt_flags & FLAG_NOINTR) != 0) {
+	if (nointr) {
+		/*
+		 * This command was issued with the FLAG_NOINTR flag, so
+		 * perform the necessary polling to collect the response
+		 * synchronously.
+		 */
 		return (cpqary3_handle_flag_nointr(cpcm, scsi_pktp));
 	}
-	cpqary3_pktp->cmd_start_time = ddi_get_lbolt();
 
-	mutex_enter(&ctlr->hw_mutex);
-	r = cpqary3_submit(ctlr, cpcm);
-	mutex_exit(&ctlr->hw_mutex);
+	mutex_enter(&cpq->hw_mutex);
+	r = cpqary3_submit(cpq, cpcm);
+	mutex_exit(&cpq->hw_mutex);
 	if (r != 0) {
 		goto fail;
 	}
@@ -917,218 +930,100 @@ cpqary3_setcap(struct scsi_address *sa, char *capstr, int value, int tgtonly)
 	}
 }
 
-/*
- * Function	:	cpqary3_handle_flag_nointr
- * Description	: 	This routine is called to handle submission and
- *			subsequently poll for the completion of a command,
- *			when its FLAG_NOINTR bit is set.
- * Called By	: 	cpqary3_transport()
- * Parameters	: 	command private structure, SCSI packet
- * Calls	: 	cpqary3_intr_onoff, cpqary3_retrieve,
- *			cpqary3_submit, cpqary3_poll
- * Return Values: 	TRAN_ACCEPT
- */
 static int
 cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 {
-	uint32_t		tag = cpcm->cpcm_tag;
-	uint32_t		simple_tag;
-	uint32_t		i;
-	cpqary3_t		*ctlr = cpcm->cpcm_ctlr;
-	cpqary3_cmdpvt_t	*cpqary3_cmdpvtp;
-	uint32_t		CmdsOutMax;
-	uint32_t		no_cmds;
-	int ret;
-
-	/*
-	 * XXX this function is totally fucked with the mutexes and so on.
-	 * fix it.
-	 */
+	cpqary3_t *cpq = cpcm->cpcm_ctlr;
 
 	/*
 	 * Before sumitting this command, ensure all commands pending
 	 * with the controller are completed.
 	 */
-	mutex_enter(&ctlr->sw_mutex);
-	mutex_enter(&ctlr->hw_mutex);
-	ctlr->cpq_intr_off = B_TRUE;
-	cpqary3_intr_onoff(ctlr, CPQARY3_INTR_DISABLE);
-	if (ctlr->cpq_host_support & 0x4)
-		cpqary3_lockup_intr_onoff(ctlr, CPQARY3_LOCKUP_INTR_DISABLE);
+	mutex_enter(&cpq->sw_mutex);
+	mutex_enter(&cpq->hw_mutex);
+	cpq->cpq_intr_off = B_TRUE;
+	cpqary3_intr_onoff(cpq, CPQARY3_INTR_DISABLE);
+	if (cpq->cpq_host_support & 0x4)
+		cpqary3_lockup_intr_onoff(cpq, CPQARY3_LOCKUP_INTR_DISABLE);
 
-	while (avl_numnodes(&ctlr->cpq_inflight) > 0) {
-		(void) cpqary3_retrieve(ctlr);
+	while (avl_numnodes(&cpq->cpq_inflight) > 0) {
+		(void) cpqary3_retrieve(cpq, 0, NULL);
 		drv_usecwait(1000);
 	}
 
-	if (cpqary3_submit(ctlr, cpcm) != 0) {
-		ctlr->cpq_intr_off = B_FALSE;
-		cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
-		if (ctlr->cpq_host_support & 0x4) {
-			cpqary3_lockup_intr_onoff(ctlr,
+	if (cpqary3_submit(cpq, cpcm) != 0) {
+		cpq->cpq_intr_off = B_FALSE;
+		cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+		if (cpq->cpq_host_support & 0x4) {
+			cpqary3_lockup_intr_onoff(cpq,
 			    CPQARY3_LOCKUP_INTR_ENABLE);
 		}
 
-		mutex_exit(&ctlr->hw_mutex);
-		mutex_exit(&ctlr->sw_mutex);
+		mutex_exit(&cpq->hw_mutex);
+		mutex_exit(&cpq->sw_mutex);
 
 		cpqary3_command_free(cpcm);
 		return (TRAN_FATAL_ERROR);
 	}
 
-	if (cpqary3_poll(ctlr, tag) != CPQARY3_SUCCESS) {
+	if (cpqary3_poll(cpq, cpcm->cpcm_tag) != DDI_SUCCESS) {
 		scsi_pktp->pkt_reason = CMD_TIMEOUT;
 		scsi_pktp->pkt_statistics = STAT_TIMEOUT;
 		scsi_pktp->pkt_state = 0;
 
-		ctlr->cpq_intr_off = B_FALSE;
-		cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
-		if (ctlr->cpq_host_support & 0x4) {
-			cpqary3_lockup_intr_onoff(ctlr,
+		cpq->cpq_intr_off = B_FALSE;
+		cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+		if (cpq->cpq_host_support & 0x4) {
+			cpqary3_lockup_intr_onoff(cpq,
 			    CPQARY3_LOCKUP_INTR_ENABLE);
 		}
 
-		mutex_exit(&ctlr->hw_mutex);
-		mutex_exit(&ctlr->sw_mutex);
+		mutex_exit(&cpq->hw_mutex);
+		mutex_exit(&cpq->sw_mutex);
 
 		cpqary3_command_free(cpcm);
 		return (TRAN_ACCEPT);
 	}
 
-	ctlr->cpq_intr_off = B_FALSE;
-	cpqary3_intr_onoff(ctlr, CPQARY3_INTR_ENABLE);
-	if (ctlr->cpq_host_support & 0x4) {
-		cpqary3_lockup_intr_onoff(ctlr, CPQARY3_LOCKUP_INTR_ENABLE);
+	cpq->cpq_intr_off = B_FALSE;
+	cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+	if (cpq->cpq_host_support & 0x4) {
+		cpqary3_lockup_intr_onoff(cpq, CPQARY3_LOCKUP_INTR_ENABLE);
 	}
 
-	mutex_exit(&ctlr->hw_mutex);
-	mutex_exit(&ctlr->sw_mutex);
+	mutex_exit(&cpq->hw_mutex);
+	mutex_exit(&cpq->sw_mutex);
 
 	return (TRAN_ACCEPT);
 }
 
-/*
- * Function	:	cpqary3_poll
- * Description	: 	This routine polls for the completion of a command.
- * Called By	: 	cpqary3_handle_flag_nointr
- * Parameters	: 	per controller, tag of the command to be polled
- * Calls	: 	cpqary3_poll_retrieve
- * Return Values: 	TRAN_ACCEPT
- */
 static int
 cpqary3_poll(cpqary3_t *cpq, uint32_t tag)
 {
-	boolean_t found = B_FALSE;
-	unsigned tries = 0;
-
 	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
 	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
 
 	/*
-	 * XXX
-	 * POLL for the completion of the said command
-	 * Since, we had ensured that controller is empty, we need not
-	 * check for the complete Retrieved Q.
-	 * However, we just check the Retrieved Q and complete all
-	 * commands in it, inclusive of the polled command.
-	 * if the polled command is completed, send back a success.
+	 * Poll the controller for command completions, stopping if we receive
+	 * a completion for the watched tag.  Note that, although we are
+	 * looking for a specific completion, any other commands that complete
+	 * in the interim will have their callbacks fired.
 	 */
+	for (unsigned tries = 0; tries < 120000; tries++) {
+		boolean_t found = B_FALSE;
 
-retry:
-	switch (cpq->cpq_ctlr_mode) {
-	case CPQARY3_CTLR_MODE_SIMPLE:
-		cpqary3_retrieve_simple(cpq, tag, &found);
-		break;
-	case CPQARY3_CTLR_MODE_PERFORMANT:
-		cpqary3_retrieve_performant(cpq, tag, &found);
-		break;
-	default:
-		panic("unknown controller mode");
-	}
+		(void) cpqary3_retrieve(cpq, tag, &found);
 
-	if (found) {
-		return (CPQARY3_SUCCESS);
-	}
+		if (found) {
+			return (DDI_SUCCESS);
+		}
 
-	if (tries++ < 120000) {
 		drv_usecwait(500);
-		goto retry;
 	}
 
-	return (CPQARY3_FAILURE);
+	return (DDI_FAILURE);
 }
 
-static int
-cpqary3_additional_cmd(struct scsi_pkt *scsi_pktp, cpqary3_t *ctlr)
-{
-	struct scsi_arq_status *arqstat;
-	/* LINTED: alignment */
-	arqstat = (struct scsi_arq_status *)(scsi_pktp->pkt_scbp);
-
-	switch (scsi_pktp->pkt_cdbp[0]) {
-	case 0x35: /* Synchronize Cache */
-
-		cpqary3_flush_cache(ctlr);
-
-		scsi_pktp->pkt_reason = CMD_CMPLT;
-		scsi_pktp->pkt_statistics = 0;
-		scsi_pktp->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_XFERRED_DATA | STATE_GOT_STATUS;
-
-		if (scsi_pktp->pkt_comp) {
-			(*scsi_pktp->pkt_comp)(scsi_pktp);
-		}
-
-		return (1);
-
-	case 0x04: /* Format Unit */
-		cmn_err(CE_NOTE, "The FORMAT UNIT is not supported by this "
-		    "device If this option is selected from the format utility "
-		    "do not continue further.  Please refer to cpqary3 driver "
-		    "man pages for details.");
-
-		return (0);
-	case SCSI_LOG_SENSE:
-	case SCSI_MODE_SELECT:
-	case SCSI_PERSISTENT_RESERVE_IN:
-		arqstat->sts_status.sts_chk = 1; /* CHECK CONDITION */
-		arqstat->sts_rqpkt_reason = CMD_CMPLT;
-		arqstat->sts_rqpkt_resid = 0;
-		arqstat->sts_rqpkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_XFERRED_DATA;
-		arqstat->sts_rqpkt_statistics = 0;
-		arqstat->sts_sensedata.es_valid = 1;
-		arqstat->sts_sensedata.es_class = CLASS_EXTENDED_SENSE;
-		arqstat->sts_sensedata.es_key = KEY_ILLEGAL_REQUEST;
-		scsi_pktp->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_XFERRED_DATA;
-
-		if (scsi_pktp->pkt_comp) {
-			(*scsi_pktp->pkt_comp)(scsi_pktp);
-		}
-		return (1);
-	}
-
-	return (0);
-}
-
-/* PERF */
-/*
- * Function	:      	cpqary3_oscmd_complete
- * Description	:      	This routine processes the
- *			completed OS commands and
- *			initiates any callback that is needed.
- * Called By	:      	cpqary3_transport
- * Parameters	:      	per-command
- * Calls	:      	cpqary3_ioctl_send_bmiccmd,
- *			cpqary3_ioctl_send_scsicmd,
- *			cpqary3_send_abortcmd, cpqary3_flush_cache,
- *			cpqary3_probe4LVs,
- *			cpqary3_probe4Tapes, cpqary3_synccmd_complete,
- *			cpqary3_detect_target_geometry,
- *			cpqary3_detect_target_geometry
- * Return Values:      	None
- */
 void
 cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 {
@@ -1136,17 +1031,10 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 	ErrorInfo_t	*errorinfop = cpcm->cpcm_va_err;
 	CommandList_t	*cmdlistp = cpcm->cpcm_va_cmd;
 	struct scsi_pkt	*scsi_pktp = cpcm->cpcm_private->scsi_cmd_pkt;
+	boolean_t nointr = (scsi_pktp->pkt_flags & FLAG_NOINTR) != 0;
 
 	VERIFY(MUTEX_HELD(&cpqary3p->sw_mutex));
 	VERIFY(cpcm->cpcm_type == CPQARY3_CMDTYPE_OS);
-
-	/*
-	 * XXX oops?
-	 */
-	if (cpcm->cpcm_free_on_complete) {
-		cpqary3_command_free(cpcm);
-		return;
-	}
 
 	if (cmdlistp->Header.Tag.error != 0) {
 		mutex_exit(&cpqary3p->sw_mutex);
@@ -1159,13 +1047,8 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 		    STATE_GOT_TARGET | STATE_SENT_CMD |
 		    STATE_XFERRED_DATA | STATE_GOT_STATUS;
 
-		/*
-		 * XXX this is suspect...
-		 */
 		if ((scsi_pktp->pkt_flags & FLAG_NOINTR) == 0) {
-			if (scsi_pktp->pkt_comp != NULL) {
-				(*scsi_pktp->pkt_comp)(scsi_pktp);
-			}
+			(*scsi_pktp->pkt_comp)(scsi_pktp);
 		}
 
 		mutex_enter(&cpqary3p->sw_mutex);
@@ -1269,7 +1152,7 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 			    scsi_pktp->pkt_statistics;
 			bcopy((caddr_t)&errorinfop->SenseInfo[0],
 			    (caddr_t)(&arq_statusp->sts_sensedata),
-			    CPQARY3_MIN(errorinfop->SenseLen,
+			    MIN(errorinfop->SenseLen,
 			    cpcm->cpcm_private->scb_len));
 			scsi_pktp->pkt_state |= STATE_ARQ_DONE;
 		}
@@ -1279,19 +1162,14 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 
 	cpqary3_command_free(cpcm);
 
-	/*
-	 * XXX this is also suspicious.
-	 */
-	if ((scsi_pktp->pkt_flags & FLAG_NOINTR) == 0) {
-		if (scsi_pktp->pkt_comp != NULL) {
-			(*scsi_pktp->pkt_comp)(scsi_pktp);
-		}
+	if (!nointr) {
+		(*scsi_pktp->pkt_comp)(scsi_pktp);
 	}
 
 	mutex_enter(&cpqary3p->sw_mutex);
 }
 
-static uint8_t
+static boolean_t
 cpqary3_is_scsi_read_write(struct scsi_pkt *scsi_pktp)
 {
 	/*
@@ -1299,17 +1177,16 @@ cpqary3_is_scsi_read_write(struct scsi_pkt *scsi_pktp)
 	 * OpCode.  We check to see if it is any one of the SCSI Read or Write
 	 * opcodes.
 	 */
-
 	switch (scsi_pktp->pkt_cdbp[0]) {
-	case SCSI_READ_6:
-	case SCSI_READ_10:
-	case SCSI_READ_12:
-	case SCSI_WRITE_6:
-	case SCSI_WRITE_10:
-	case SCSI_WRITE_12:
-		return (1);
+	case SPC3_CMD_READ6:
+	case SPC3_CMD_READ10:
+	case SPC3_CMD_READ12:
+	case SPC3_CMD_WRITE6:
+	case SPC3_CMD_WRITE10:
+	case SPC3_CMD_WRITE12:
+		return (B_TRUE);
 
 	default:
-		return (0);
+		return (B_FALSE);
 	}
 }
