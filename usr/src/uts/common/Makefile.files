@@ -2158,7 +2158,6 @@ CPQARY3_OBJS =	cpqary3.o \
 		cpqary3_interrupts.o \
 		cpqary3_commands.o \
 		cpqary3_ciss_simple.o \
-		cpqary3_ciss_performant.o \
 		cpqary3_ciss.o
 
 #

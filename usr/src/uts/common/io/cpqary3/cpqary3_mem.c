@@ -39,22 +39,6 @@ static ddi_dma_attr_t cpqary3_ctlr_dma_attr = {
  */
 extern ddi_device_acc_attr_t	cpqary3_dev_attributes;
 
-/*
- * Function	: 	cpqary3_alloc_phyctgs_mem
- * Description	: 	This routine allocates Physically Contiguous Memory
- *			for Commands or Scatter/Gather.
- * Called By	:	cpqary3_meminit(), cpqary3_send_NOE_command()
- *			cpqary3_synccmd_alloc()
- * Parameters	: 	per-controller, size,
- *			physical address that is sent back, per-physical
- * Calls	:	cpqary3_free_phyctgs_mem(), ddi_dma_addr_bind_handle(),
- *			ddi_dma_alloc_handle(), ddi_dma_mem_alloc()
- * Return Values: 	Actually, this function sends back 2 values, one as an
- *			explicit return and the other by updating a
- * 			pointer-parameter:
- * 			Virtual Memory Pointer to the allocated Memory(caddr_t),
- * 			Physical Address of the allocated Memory(phyaddr)
- */
 caddr_t
 cpqary3_alloc_phyctgs_mem(cpqary3_t *ctlr, size_t size_mempool,
     uint32_t *phyaddr, cpqary3_phyctg_t *phyctgp)
@@ -167,17 +151,6 @@ cpqary3_alloc_phyctgs_mem(cpqary3_t *ctlr, size_t size_mempool,
 	return (mempool);
 }
 
-/*
- * Function	: 	cpqary3_free_phyctg_mem ()
- * Description	: 	This routine frees the Physically contigous memory
- *			that was allocated using ddi_dma operations.
- *			It also fress any related memory that was occupied.
- * Called By	: 	cpqary3_alloc_phyctgs_mem(), cpqary3_memfini(),
- *			cpqary3_send_NOE_command(), cpqary3_NOE_handler(),
- *			cpqary3_synccmd_alloc(), cpqary3_synccmd_cleanup()
- * Parameters	: 	per-physical, identifier(what all to free)
- * Calls	: 	None
- */
 void
 cpqary3_free_phyctgs_mem(cpqary3_phyctg_t *cpqary3_phyctgp, uint8_t cleanstat)
 {

@@ -48,10 +48,6 @@ cpqary3_interrupts_setup(cpqary3_t *cpq)
 		hw_isr = cpqary3_isr_hw_simple;
 		sw_isr = cpqary3_isr_sw_simple;
 		break;
-	case CPQARY3_CTLR_MODE_PERFORMANT:
-		hw_isr = cpqary3_isr_hw_performant;
-		sw_isr = cpqary3_isr_sw_performant;
-		break;
 	default:
 		panic("unknown controller mode");
 	}

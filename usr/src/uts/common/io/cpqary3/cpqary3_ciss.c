@@ -38,10 +38,6 @@ cpqary3_retrieve(cpqary3_t *cpq, uint32_t want_tag, boolean_t *found)
 		cpqary3_retrieve_simple(cpq, want_tag, found);
 		return (DDI_SUCCESS);
 
-	case CPQARY3_CTLR_MODE_PERFORMANT:
-		cpqary3_retrieve_performant(cpq, want_tag, found);
-		return (DDI_SUCCESS);
-
 	case CPQARY3_CTLR_MODE_UNKNOWN:
 		break;
 	}
@@ -86,17 +82,6 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	switch (cpq->cpq_ctlr_mode) {
 	case CPQARY3_CTLR_MODE_SIMPLE:
 		cpqary3_put32(cpq, CISS_I2O_INBOUND_POST_Q, cpcm->cpcm_pa_cmd);
-		break;
-
-	case CPQARY3_CTLR_MODE_PERFORMANT:
-		/*
-		 * XXX The driver always uses the 0th block fetch count always
-		 *
-		 * (NB: from spec, the 0x1 here sets "pull from host memory"
-		 * mode, and the 0 represents "pull just one command record"
-		 */
-		cpqary3_put32(cpq, CISS_I2O_INBOUND_POST_Q,
-		    cpcm->cpcm_pa_cmd | 0 | 0x1);
 		break;
 
 	default:
@@ -243,8 +228,7 @@ cpqary3_cfgtbl_flush(cpqary3_t *cpq)
 int
 cpqary3_cfgtbl_transport_has_support(cpqary3_t *cpq, int xport)
 {
-	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
-	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
+	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE);
 
 	/*
 	 * Read the current value of the TransportSupport field in the
@@ -270,8 +254,7 @@ cpqary3_cfgtbl_transport_has_support(cpqary3_t *cpq, int xport)
 void
 cpqary3_cfgtbl_transport_set(cpqary3_t *cpq, int xport)
 {
-	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
-	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
+	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE);
 
 	ddi_put32(cpq->cpq_ct_handle,
 	    &cpq->cpq_ct->HostWrite.TransportRequest, xport);
@@ -280,8 +263,7 @@ cpqary3_cfgtbl_transport_set(cpqary3_t *cpq, int xport)
 int
 cpqary3_cfgtbl_transport_confirm(cpqary3_t *cpq, int xport)
 {
-	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE ||
-	    xport == CISS_CFGTBL_XPORT_PERFORMANT);
+	VERIFY(xport == CISS_CFGTBL_XPORT_SIMPLE);
 
 	/*
 	 * Read the current value of the TransportActive field in the
@@ -316,13 +298,6 @@ uint32_t
 cpqary3_ctlr_get_cmdsoutmax(cpqary3_t *cpq)
 {
 	uint32_t val;
-
-	if (cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_PERFORMANT) {
-		if ((val = ddi_get32(cpq->cpq_ct_handle,
-		    &cpq->cpq_ct->MaxPerfModeCmdsOutMax)) != 0) {
-			return (val);
-		}
-	}
 
 	return (ddi_get32(cpq->cpq_ct_handle, &cpq->cpq_ct->CmdsOutMax));
 }

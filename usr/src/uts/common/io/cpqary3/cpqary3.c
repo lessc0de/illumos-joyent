@@ -256,7 +256,6 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	    sizeof (cpqary3_command_t), offsetof(cpqary3_command_t,
 	    cpcm_node));
 	cv_init(&cpq->cv_immediate_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&cpq->cv_noe_wait, NULL, CV_DRIVER, NULL);
 	cv_init(&cpq->cv_flushcache_wait, NULL, CV_DRIVER, NULL);
 	cv_init(&cpq->cv_abort_wait, NULL, CV_DRIVER, NULL);
 	cv_init(&cpq->cv_ioctl_wait, NULL, CV_DRIVER, NULL);
@@ -361,25 +360,6 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	    15 * NANOSEC, DDI_IPL_0);
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_PERIODIC;
 
-	/*
-	 * XXX OK, maybe later...
-	 */
-#if 0
-	/* NOE */
-	if (cpqary3p->noe_support == 1) {
-		/* Enable the Notification on Event in this controller */
-		if (CPQARY3_SUCCESS ==
-		    cpqary3_send_NOE_command(cpqary3p,
-		    NULL, CPQARY3_NOE_INIT)) {
-			cleanstatus |= CPQARY3_NOE_INIT_DONE;
-		} else {
-			cmn_err(CE_CONT, "CPQary3 : Failed to initialize "
-			    "NOTIFICATION ON EVENT \n");
-		}
-	}
-	/* NOE */
-#endif
-
 	/* Report that an Instance of the Driver is Attached Successfully */
 	ddi_report_dev(dip);
 
@@ -465,52 +445,12 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	return (status);
 }
 
-
-/*
- * Function	: 	cqpary3_cleanup
- * Description	: 	This routine frees all allocated resources.
- * Called By	: 	kernel
- * Parameters	: 	per-controller, bit-map(stating what all to clean)
- * Return Values: 	None
- */
 static void
 cpqary3_cleanup(cpqary3_t *cpq)
 {
 	int8_t		node_name[10];
 	clock_t		cpqary3_lbolt;
 	uint32_t	targ;
-
-	/*
-	 * Disable the NOE command
-	 * Free the Command Memory Pool
-	 * destroy all conditional variables
-	 */
-
-	/*
-	 * XXX maybe later
-	 */
-#if 0
-	/*
-	 * We have removed NOE functionality from the
-	 * driver. So commenting the below piece of code
-	 */
-
-	if (status & CPQARY3_NOE_INIT_DONE) {
-		if (CPQARY3_SUCCESS == cpqary3_disable_NOE_command(cpq)) {
-			mutex_enter(&cpq->hw_mutex);
-			cpqary3_lbolt = ddi_get_lbolt();
-			if (DDI_FAILURE ==
-			    cv_timedwait_sig(&cpq->cv_noe_wait,
-			    &cpq->hw_mutex,
-			    cpqary3_lbolt + drv_usectohz(3000000))) {
-				cmn_err(CE_NOTE,
-				    "CPQary3: Resume signal for disable NOE "
-				    "command not received \n");
-			}
-			mutex_exit(&cpq->hw_mutex);
-		}
-	}
-#endif
 
 	cpqary3_interrupts_teardown(cpq);
 
@@ -541,7 +481,6 @@ cpqary3_cleanup(cpqary3_t *cpq)
 
 		cv_destroy(&cpq->cv_abort_wait);
 		cv_destroy(&cpq->cv_flushcache_wait);
-		cv_destroy(&cpq->cv_noe_wait);
 		cv_destroy(&cpq->cv_immediate_wait);
 		cv_destroy(&cpq->cv_ioctl_wait);
 

@@ -91,8 +91,7 @@ typedef enum cpqary3_wait_state {
 
 typedef enum cpqary3_ctlr_mode {
 	CPQARY3_CTLR_MODE_UNKNOWN = 0,
-	CPQARY3_CTLR_MODE_SIMPLE,
-	CPQARY3_CTLR_MODE_PERFORMANT
+	CPQARY3_CTLR_MODE_SIMPLE
 } cpqary3_ctlr_mode_t;
 
 /*
@@ -190,9 +189,7 @@ typedef enum cpqary3_ctlr_mode {
  */
 #include "cpqary3_ciss.h"
 #include "cpqary3_mem.h"
-#include "cpqary3_noe.h"
 #include "cpqary3_scsi.h"
-#include "cpqary3_ioctl.h"
 
 /*
  * Per Target Structure
@@ -293,7 +290,6 @@ struct cpqary3 {
 
 	/* Condition Variables used */
 	kcondvar_t		cv_immediate_wait;
-	kcondvar_t		cv_noe_wait;
 	kcondvar_t		cv_flushcache_wait;
 	kcondvar_t		cv_abort_wait;
 	kcondvar_t		cv_ioctl_wait; /* Variable for ioctls */
@@ -342,7 +338,6 @@ struct cpqary3 {
 	CfgTable_t		*cpq_ct;
 	ddi_acc_handle_t	cpq_ct_handle;
 
-	uint32_t		noe_support;
 	boolean_t		controller_lockup;
 	boolean_t		lockup_logged;
 	uint32_t		poll_flag;
@@ -475,12 +470,6 @@ void cpqary3_periodic(void *);
 int cpqary3_flush_cache(cpqary3_t *);
 void cpqary3_intr_onoff(cpqary3_t *, uint8_t);
 void cpqary3_lockup_intr_onoff(cpqary3_t *, uint8_t);
-#if 0
-uint8_t cpqary3_disable_NOE_command(cpqary3_t *);
-uint8_t cpqary3_send_NOE_command(cpqary3_t *, cpqary3_cmdpvt_t *, uint8_t);
-void cpqary3_NOE_handler(cpqary3_cmdpvt_t *);
-void cpqary3_noe_complete(cpqary3_cmdpvt_t *cpqary3_cmdpvtp);
-#endif
 uint16_t cpqary3_init_ctlr_resource(cpqary3_t *);
 int32_t cpqary3_ioctl_driver_info(uintptr_t, int);
 int32_t cpqary3_ioctl_ctlr_info(uintptr_t, cpqary3_t *, int);
@@ -490,7 +479,6 @@ uint8_t cpqary3_probe4targets(cpqary3_t *);
 int cpqary3_submit(cpqary3_t *, cpqary3_command_t *);
 int cpqary3_retrieve(cpqary3_t *, uint32_t, boolean_t *);
 void cpqary3_retrieve_simple(cpqary3_t *, uint32_t, boolean_t *);
-void cpqary3_retrieve_performant(cpqary3_t *, uint32_t, boolean_t *);
 int cpqary3_target_geometry(struct scsi_address *);
 int8_t cpqary3_detect_target_geometry(cpqary3_t *);
 uint8_t cpqary3_send_abortcmd(cpqary3_t *, uint16_t, CommandList_t *);
@@ -526,8 +514,6 @@ void cpqary3_synccmd_complete(cpqary3_command_t *);
  */
 uint32_t cpqary3_isr_hw_simple(caddr_t);
 uint32_t cpqary3_isr_sw_simple(caddr_t);
-uint32_t cpqary3_isr_hw_performant(caddr_t);
-uint32_t cpqary3_isr_sw_performant(caddr_t);
 void cpqary3_trigger_sw_isr(cpqary3_t *);
 int cpqary3_interrupts_setup(cpqary3_t *);
 void cpqary3_interrupts_teardown(cpqary3_t *);

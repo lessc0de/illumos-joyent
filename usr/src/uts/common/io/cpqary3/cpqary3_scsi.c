@@ -613,17 +613,6 @@ cpqary3_synccmd_complete(cpqary3_command_t *cpcm)
 
 	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
 
-	/*
-	 * XXX This flag is set by the periodic function which we have
-	 * disabled for now...
-	 */
-#if 0
-	if (CPQARY3_TIMEOUT == cpqary3_cmdpvtp->cmdpvt_flag) {
-		cpqary3_cmdlist_release(cpqary3_cmdpvtp, CPQARY3_NO_MUTEX);
-		return;
-	}
-#endif
-
 	switch (cpcm->cpcm_synccmd_status) {
 	case CPQARY3_SYNCCMD_STATUS_TIMEOUT:
 		/*
