@@ -10,23 +10,11 @@
  */
 
 /*
- * Copyright (C) 2013 Hewlett-Packard Development Company, L.P.
  * Copyright 2016 Joyent, Inc.
  */
 
-/*
- * This module contains routines that program the controller. All
- * operations  viz.,  initialization of  controller,  submision &
- * retrieval  of  commands, enabling &  disabling of  interrupts,
- * checking interrupt status are performed here.
- */
-
-#include <sys/sdt.h>
 #include "cpqary3.h"
 
-/*
- * XXX
- */
 int
 cpqary3_retrieve(cpqary3_t *cpq, uint32_t want_tag, boolean_t *found)
 {
@@ -91,29 +79,17 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	return (0);
 }
 
-
-/*
- * Function	: 	cpqary3_intr_onoff
- * Description	: 	This routine enables/disables the HBA interrupt.
- * Called By	: 	cpqary3_attach(), ry3_handle_flag_nointr(),
- *			cpqary3_tick_hdlr(), cpqary3_init_ctlr_resource()
- * Parameters	: 	per-controller, flag stating enable/disable
- * Calls	: 	None
- * Return Values: 	None
- */
 void
-cpqary3_intr_onoff(cpqary3_t *cpq, uint8_t flag)
+cpqary3_intr_set(cpqary3_t *cpq, boolean_t enabled)
 {
 	/*
 	 * Read the Interrupt Mask Register.
 	 */
 	uint32_t imr = cpqary3_get32(cpq, CISS_I2O_INTERRUPT_MASK);
 
-	VERIFY(flag == CPQARY3_INTR_ENABLE || flag == CPQARY3_INTR_DISABLE);
-
 	switch (cpq->cpq_ctlr_mode) {
 	case CPQARY3_CTLR_MODE_SIMPLE:
-		if (flag == CPQARY3_INTR_ENABLE) {
+		if (enabled) {
 			imr &= ~INTR_SIMPLE_MASK;
 		} else {
 			imr |= INTR_SIMPLE_MASK;
@@ -121,7 +97,7 @@ cpqary3_intr_onoff(cpqary3_t *cpq, uint8_t flag)
 		break;
 
 	default:
-		if (flag == CPQARY3_INTR_ENABLE) {
+		if (enabled) {
 			imr &= ~cpq->cpq_board->bd_intrmask;
 		} else {
 			imr |= cpq->cpq_board->bd_intrmask;
@@ -132,18 +108,8 @@ cpqary3_intr_onoff(cpqary3_t *cpq, uint8_t flag)
 	cpqary3_put32(cpq, CISS_I2O_INTERRUPT_MASK, imr);
 }
 
-/*
- * Function	: 	cpqary3_lockup_intr_onoff
- * Description	: 	This routine enables/disables the lockup interrupt.
- * Called By	: 	cpqary3_attach(), cpqary3_handle_flag_nointr(),
- *			cpqary3_tick_hdlr(), cpqary3_hw_isr,
- *			cpqary3_init_ctlr_resource()
- * Parameters	: 	per-controller, flag stating enable/disable
- * Calls	: 	None
- * Return Values: 	None
- */
 void
-cpqary3_lockup_intr_onoff(cpqary3_t *cpq, uint8_t flag)
+cpqary3_lockup_intr_set(cpqary3_t *cpq, boolean_t enabled)
 {
 	/*
 	 * Read the Interrupt Mask Register.
@@ -154,11 +120,9 @@ cpqary3_lockup_intr_onoff(cpqary3_t *cpq, uint8_t flag)
 	 * Enable or disable firmware lockup interrupts from the controller
 	 * based on the flag.
 	 */
-	if (flag == CPQARY3_LOCKUP_INTR_ENABLE) {
+	if (enabled) {
 		imr &= ~cpq->cpq_board->bd_lockup_intrmask;
 	} else {
-		VERIFY(flag == CPQARY3_LOCKUP_INTR_DISABLE);
-
 		imr |= cpq->cpq_board->bd_lockup_intrmask;
 	}
 

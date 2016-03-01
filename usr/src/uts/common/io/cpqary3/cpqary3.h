@@ -468,8 +468,6 @@ typedef struct cpqary3_ioctlreq {
 void cpqary3_init_hbatran(cpqary3_t *);
 void cpqary3_periodic(void *);
 int cpqary3_flush_cache(cpqary3_t *);
-void cpqary3_intr_onoff(cpqary3_t *, uint8_t);
-void cpqary3_lockup_intr_onoff(cpqary3_t *, uint8_t);
 uint16_t cpqary3_init_ctlr_resource(cpqary3_t *);
 int32_t cpqary3_ioctl_driver_info(uintptr_t, int);
 int32_t cpqary3_ioctl_ctlr_info(uintptr_t, cpqary3_t *, int);
@@ -517,6 +515,8 @@ uint32_t cpqary3_isr_sw_simple(caddr_t);
 void cpqary3_trigger_sw_isr(cpqary3_t *);
 int cpqary3_interrupts_setup(cpqary3_t *);
 void cpqary3_interrupts_teardown(cpqary3_t *);
+void cpqary3_intr_set(cpqary3_t *, boolean_t);
+void cpqary3_lockup_intr_set(cpqary3_t *, boolean_t);
 
 /*
  * Controller initialisation routines.

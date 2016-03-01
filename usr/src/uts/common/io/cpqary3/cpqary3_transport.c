@@ -942,9 +942,10 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 	mutex_enter(&cpq->sw_mutex);
 	mutex_enter(&cpq->hw_mutex);
 	cpq->cpq_intr_off = B_TRUE;
-	cpqary3_intr_onoff(cpq, CPQARY3_INTR_DISABLE);
-	if (cpq->cpq_host_support & 0x4)
-		cpqary3_lockup_intr_onoff(cpq, CPQARY3_LOCKUP_INTR_DISABLE);
+	cpqary3_intr_set(cpq, B_FALSE);
+	if (cpq->cpq_host_support & 0x4) {
+		cpqary3_lockup_intr_set(cpq, B_FALSE);
+	}
 
 	while (avl_numnodes(&cpq->cpq_inflight) > 0) {
 		(void) cpqary3_retrieve(cpq, 0, NULL);
@@ -953,10 +954,9 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 
 	if (cpqary3_submit(cpq, cpcm) != 0) {
 		cpq->cpq_intr_off = B_FALSE;
-		cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+		cpqary3_intr_set(cpq, B_TRUE);
 		if (cpq->cpq_host_support & 0x4) {
-			cpqary3_lockup_intr_onoff(cpq,
-			    CPQARY3_LOCKUP_INTR_ENABLE);
+			cpqary3_lockup_intr_set(cpq, B_TRUE);
 		}
 
 		mutex_exit(&cpq->hw_mutex);
@@ -972,10 +972,9 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 		scsi_pktp->pkt_state = 0;
 
 		cpq->cpq_intr_off = B_FALSE;
-		cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+		cpqary3_intr_set(cpq, B_TRUE);
 		if (cpq->cpq_host_support & 0x4) {
-			cpqary3_lockup_intr_onoff(cpq,
-			    CPQARY3_LOCKUP_INTR_ENABLE);
+			cpqary3_lockup_intr_set(cpq, B_TRUE);
 		}
 
 		mutex_exit(&cpq->hw_mutex);
@@ -986,9 +985,9 @@ cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
 	}
 
 	cpq->cpq_intr_off = B_FALSE;
-	cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+	cpqary3_intr_set(cpq, B_TRUE);
 	if (cpq->cpq_host_support & 0x4) {
-		cpqary3_lockup_intr_onoff(cpq, CPQARY3_LOCKUP_INTR_ENABLE);
+		cpqary3_lockup_intr_set(cpq, B_TRUE);
 	}
 
 	mutex_exit(&cpq->hw_mutex);

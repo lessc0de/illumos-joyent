@@ -55,7 +55,7 @@ cpqary3_isr_hw_simple(caddr_t arg)
 	 * Disable interrupts until the soft interrupt handler has had a chance
 	 * to read and process replies.
 	 */
-	cpqary3_intr_onoff(cpq, CPQARY3_INTR_DISABLE);
+	cpqary3_intr_set(cpq, B_FALSE);
 
 	cpqary3_trigger_sw_isr(cpq);
 
@@ -86,7 +86,7 @@ cpqary3_isr_sw_simple(caddr_t arg)
 	 * Unmask the controller inbound data interrupt.
 	 */
 	if (!cpq->cpq_intr_off) {
-		cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+		cpqary3_intr_set(cpq, B_TRUE);
 	}
 
 	cpq->cpq_swintr_flag = B_FALSE;
@@ -146,7 +146,7 @@ cpqary3_ctlr_init_simple(cpqary3_t *cpq)
 	/*
 	 * Disable device interrupts while we are setting up.
 	 */
-	cpqary3_intr_onoff(cpq, CPQARY3_INTR_DISABLE);
+	cpqary3_intr_set(cpq, B_FALSE);
 
 	if ((cpq->cpq_maxcmds = cpqary3_ctlr_get_cmdsoutmax(cpq)) == 0) {
 		dev_err(cpq->dip, CE_WARN, "maximum outstanding commands set "

@@ -348,9 +348,9 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_MINOR_NODE;
 
 	/* Enable the Controller Interrupt */
-	cpqary3_intr_onoff(cpq, CPQARY3_INTR_ENABLE);
+	cpqary3_intr_set(cpq, B_TRUE);
 	if (cpq->cpq_host_support & 0x4) {
-		cpqary3_lockup_intr_onoff(cpq, CPQARY3_LOCKUP_INTR_ENABLE);
+		cpqary3_lockup_intr_set(cpq, B_TRUE);
 	}
 
 	/*
