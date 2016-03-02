@@ -79,8 +79,6 @@ cpqary3_alloc_phyctgs_mem(cpqary3_t *ctlr, size_t size_mempool,
 			cmn_err(CE_CONT, "CPQary3: Unexpected Value %x from "
 			    "call to allocate the DMA Handle \n", retvalue);
 		}
-		/* Calling kmem_free to free the memory */
-		kmem_free(phyctgp, sizeof (cpqary3_phyctg_t));
 		return (NULL);
 	}
 

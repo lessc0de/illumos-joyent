@@ -14,15 +14,15 @@
  * Copyright 2016 Joyent, Inc.
  */
 
+#include <sys/policy.h>
 #include "cpqary3.h"
 
 /*
  * Local Autoconfiguration Function Prototype Declations
  */
-
-int cpqary3_attach(dev_info_t *, ddi_attach_cmd_t);
-int cpqary3_detach(dev_info_t *, ddi_detach_cmd_t);
-int cpqary3_ioctl(dev_t, int, intptr_t, int, cred_t *, int *);
+static int cpqary3_attach(dev_info_t *, ddi_attach_cmd_t);
+static int cpqary3_detach(dev_info_t *, ddi_detach_cmd_t);
+static int cpqary3_ioctl(dev_t, int, intptr_t, int, cred_t *, int *);
 
 /*
  * Local Functions Definitions
@@ -33,10 +33,8 @@ static uint8_t cpqary3_update_ctlrdetails(cpqary3_t *, uint32_t *);
 static int cpqary3_command_comparator(const void *, const void *);
 
 /*
- * Global Variables Definitions
+ * Per-controller soft state object.
  */
-
-static char cpqary3_brief[]    =	"HP Smart Array Driver";
 void *cpqary3_state;
 
 /*
@@ -66,7 +64,6 @@ void *cpqary3_state;
  * The Driver DMA Limit structure.
  * Data used for SMART Integrated Array Controller shall be used.
  */
-
 ddi_dma_attr_t cpqary3_dma_attr = {
 	DMA_ATTR_V0,		/* ddi_dma_attr version */
 	0,			/* Low Address */
@@ -89,7 +86,8 @@ ddi_dma_attr_t cpqary3_dma_attr = {
 };
 
 /*
- * The Device Access Attribute Structure.
+ * DMA access for both device control registers and for command block
+ * allocation.
  */
 ddi_device_acc_attr_t cpqary3_dev_attributes = {
 	DDI_DEVICE_ATTR_V0,
@@ -101,10 +99,8 @@ ddi_device_acc_attr_t cpqary3_dev_attributes = {
  * Character-Block Operations Structure
  */
 static struct cb_ops cpqary3_cb_ops = {
-	/* HPQacucli Changes */
-	scsi_hba_open,
-	scsi_hba_close,
-	/* HPQacucli Changes */
+	scsi_hba_open,		/* cb_open */
+	scsi_hba_close,		/* cb_close */
 	nodev,			/* cb_strategy */
 	nodev,			/* cb_print */
 	nodev,			/* cb_dump */
@@ -118,26 +114,27 @@ static struct cb_ops cpqary3_cb_ops = {
 	ddi_prop_op,		/* cb_prop_op */
 	NULL,			/* cb_stream */
 	(int)(D_NEW|D_MP),	/* cb_flag */
-	CB_REV,
-	nodev,
-	nodev
+	CB_REV,			/* cb_rev */
+	nodev,			/* cb_aread */
+	nodev			/* cb_awrite */
 };
 
 /*
  * Device Operations Structure
  */
 static struct dev_ops cpqary3_dev_ops = {
-	DEVO_REV,		/* Driver Build Version */
-	0,			/* Driver reference count */
-	nodev,			/* Get Info */
-	nulldev,		/* Identify not required */
-	nulldev,		/* Probe, obselete for s2.6 and up */
-	cpqary3_attach,		/* Attach routine */
-	cpqary3_detach,		/* Detach routine */
-	nodev,			/* Reset */
-	&cpqary3_cb_ops,	/* Entry Points for C&B drivers */
-	NULL,			/* Bus ops */
-	nodev			/* cpqary3_power */
+	DEVO_REV,		/* devo_rev */
+	0,			/* devo_refcnt */
+	nodev,			/* devo_getinfo */
+	nulldev,		/* devo_identify */
+	nulldev,		/* devo_probe */
+	cpqary3_attach,		/* devo_attach */
+	cpqary3_detach,		/* devo_detach */
+	nodev,			/* devo_reset */
+	&cpqary3_cb_ops,	/* devo_db_ops */
+	NULL,			/* devo_bus_ops */
+	nodev,			/* devo_power */
+	nodev			/* devo_quiesce */
 };
 
 /*
@@ -145,7 +142,7 @@ static struct dev_ops cpqary3_dev_ops = {
  */
 static struct modldrv cpqary3_modldrv = {
 	&mod_driverops,		/* Module Type - driver */
-	cpqary3_brief,		/* Driver Desc */
+	"HP Smart Array",	/* Driver Desc */
 	&cpqary3_dev_ops	/* Driver Ops */
 };
 
@@ -183,7 +180,6 @@ fail:
 	return (r);
 }
 
-
 int
 _fini()
 {
@@ -203,7 +199,6 @@ _fini()
 	return (retvalue);
 }
 
-
 int
 _info(struct modinfo *modinfop)
 {
@@ -213,8 +208,7 @@ _info(struct modinfo *modinfop)
 	return (mod_info(&cpqary3_modlinkage, modinfop));
 }
 
-
-int
+static int
 cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 {
 	int8_t		minor_node_name[14];
@@ -367,7 +361,7 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 }
 
 
-int
+static int
 cpqary3_detach(dev_info_t *dip, ddi_detach_cmd_t detach_cmd)
 {
 	cpqary3_t	*cpqary3p;
@@ -399,44 +393,27 @@ cpqary3_detach(dev_info_t *dip, ddi_detach_cmd_t detach_cmd)
 
 }
 
-
-int
+static int
 cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
     int *rval)
 {
 	cpqary3_t *cpq;
 	minor_t cpqary3_minor_num;
-	int instance;
+	int inst = MINOR2INST(getminor(dev));
 	int status;
 
-	/*
-	 * XXX
-	 */
-#if 0
 	if (secpolicy_sys_config(credp, B_FALSE) != 0) {
 		return (EPERM);
 	}
-#endif
 
 	/*
 	 * Fetch the soft state object for this instance.
 	 */
-	cpq = ddi_get_soft_state(cpqary3_state, MINOR2INST(getminor(dev)));
-	if (cpq == NULL) {
+	if ((cpq = ddi_get_soft_state(cpqary3_state, inst)) == NULL) {
 		return (ENODEV);
 	}
 
 	switch (cmd) {
-#if 0
-	case CPQARY3_IOCTL_BMIC_PASS:
-		status = *rval = cpqary3_ioctl_bmic_pass(arg, cpq, mode);
-		break;
-
-	case CPQARY3_IOCTL_SCSI_PASS:
-		status = *rval = cpqary3_ioctl_scsi_pass(arg, cpq, mode);
-		break;
-#endif
-
 	default:
 		status = scsi_hba_ioctl(dev, cmd, arg, mode, credp, rval);
 		break;

@@ -254,10 +254,10 @@ typedef struct cpqary3_replyq {
 	cpqary3_phyctg_t cprq_phyctg;
 } cpqary3_replyq_t;
 
-typedef struct cpqary3 cpqary3_t;
 /*
  * Per Controller Structure
  */
+typedef struct cpqary3 cpqary3_t;
 struct cpqary3 {
 	dev_info_t		*dip;
 	int			cpq_instance;
@@ -307,23 +307,6 @@ struct cpqary3 {
 	cpqary3_tgt_t		*cpqary3_tgtp[CPQARY3_MAX_TGT];
 
 	/*
-	 * PCI Configuration Registers
-	 * 0x10	Primary I2O Memory BAR 	- for Host Interface
-	 * 0x14	Primary DRAM 1 BAR	- for Transport Configuration Table
-	 *
-	 * Host Interface Registers
-	 * Offset from Primary I2O Memory BAR
-	 * 0x20 Inbound Doorbell	- for interrupting controller
-	 * 0x30	Outbound List Status 	- for signalling status of Reply Q
-	 * 0x34	Outbound Interrupt Mask	- for masking Interrupts to host
-	 * 0x40	Host Inbound Queue	- Request Q
-	 * 0x44	Host Outbound Queue	- reply Q
-	 *
-	 * Offset from Primary DRAM 1 BAR
-	 * 0x00	Configuration Table 	- for Controller Transport Layer
-	 */
-
-	/*
 	 * Access to the I2O Registers:
 	 */
 	unsigned		cpq_i2o_bar;
@@ -337,10 +320,6 @@ struct cpqary3 {
 	uint32_t		cpq_ct_baseaddr;
 	CfgTable_t		*cpq_ct;
 	ddi_acc_handle_t	cpq_ct_handle;
-
-	boolean_t		controller_lockup;
-	boolean_t		lockup_logged;
-	uint32_t		poll_flag;
 };
 
 typedef struct cpqary3_command cpqary3_command_t;
