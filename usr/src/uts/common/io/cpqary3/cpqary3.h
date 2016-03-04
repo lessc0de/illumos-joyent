@@ -190,40 +190,6 @@ typedef enum cpqary3_ctlr_mode {
 #include "cpqary3_mem.h"
 #include "cpqary3_scsi.h"
 
-/*
- * Logical Volume Structure
- */
-typedef enum cpqary3_volume_flags {
-	CPQARY3_VOL_FLAG_WWN =			(0x1 << 0),
-} cpqary3_volume_flags_t;
-typedef struct cpqary3_volume {
-	LogDevAddr_t		cplv_addr;
-	cpqary3_volume_flags_t	cplv_flags;
-
-	uint8_t			cplv_wwn[16];
-
-	cpqary3_t		*cplv_ctlr;
-	list_node_t		cplv_link;
-
-	/*
-	 * List of SCSA targets currently attached to this Logical Volume:
-	 */
-	list_t			cplv_targets;
-} cpqary3_volume_t;
-
-/*
- * Per-Target Structure
- */
-typedef struct cpqary3_target {
-	struct scsi_device	*cptg_scsi_dev;
-
-	/*
-	 * Linkage back to the Logical Volume that this target represents:
-	 */
-	cpqary3_volume_t	*cptg_volume;
-	list_node_t		cptg_link_volume;
-} cpqary3_target_t;
-
 #if 0
 /*
  * Per Target Structure
@@ -338,14 +304,7 @@ struct cpqary3 {
 	kmutex_t		cpq_mutex;
 	kcondvar_t		cpq_cv_finishq;
 
-	/*
-	 * Controller target tracking.  Note that "cpq_ntargets" refers to the
-	 * current number of visible LUNs, as reported by the controller.  The
-	 * "cpq_targets" array is a sparse mapping from target ID number to
-	 * the relevant target object.
-	 */
-	cpqary3_tgt_t		*cpq_targets[CPQARY3_MAX_TGT];
-	unsigned		cpq_ntargets;
+	list_t			cpq_volumes;
 
 	/*
 	 * Controller Heartbeat Tracking
@@ -388,8 +347,44 @@ struct cpqary3 {
 	ddi_acc_handle_t	cpq_ct_handle;
 };
 
+/*
+ * Logical Volume Structure
+ */
+typedef enum cpqary3_volume_flags {
+	CPQARY3_VOL_FLAG_WWN =			(0x1 << 0),
+} cpqary3_volume_flags_t;
+typedef struct cpqary3_volume {
+	LogDevAddr_t		cplv_addr;
+	cpqary3_volume_flags_t	cplv_flags;
+
+	uint8_t			cplv_wwn[16];
+
+	cpqary3_t		*cplv_ctlr;
+	list_node_t		cplv_link;
+
+	/*
+	 * List of SCSA targets currently attached to this Logical Volume:
+	 */
+	list_t			cplv_targets;
+} cpqary3_volume_t;
+
+/*
+ * Per-Target Structure
+ */
+typedef struct cpqary3_target {
+	struct scsi_device	*cptg_scsi_dev;
+
+	/*
+	 * Linkage back to the Logical Volume that this target represents:
+	 */
+	cpqary3_volume_t	*cptg_volume;
+	list_node_t		cptg_link_volume;
+} cpqary3_target_t;
+
+
 typedef struct cpqary3_command cpqary3_command_t;
 typedef struct cpqary3_command_internal cpqary3_command_internal_t;
+typedef struct cpqary3_command_scsa cpqary3_command_scsa_t;
 typedef struct cpqary3_pkt cpqary3_pkt_t;
 
 typedef enum cpqary3_command_status {
@@ -415,6 +410,7 @@ struct cpqary3_command {
 	cpqary3_command_type_t cpcm_type;
 
 	cpqary3_t *cpcm_ctlr;
+	cpqary3_target_t *cpcm_target;
 
 	list_node_t cpcm_link;		/* Linkage for allocated list. */
 	list_node_t cpcm_link_finish;	/* Linkage for completion list. */
@@ -425,7 +421,7 @@ struct cpqary3_command {
 
 	cpqary3_command_status_t cpcm_status;
 
-	cpqary3_pkt_t *cpcm_private;
+	cpqary3_command_scsa_t *cpcm_scsa;
 	cpqary3_command_internal_t *cpcm_internal;
 
 	/*
@@ -454,7 +450,18 @@ struct cpqary3_command_internal {
 	size_t cpcmi_len;
 };
 
+/*
+ * Commands issued via the SCSI framework have a number of additional
+ * properties.
+ */
+struct cpqary3_command_scsa {
+	struct scsi_pkt		*cpcms_pkt;
+	int			cpcms_flags;
+	cpqary3_command_t	*cpcms_command;
+};
 
+
+#if 0
 /* cmd_flags */
 #define	CFLAG_DMASEND	0x01
 #define	CFLAG_CMDIOPB	0x02
@@ -484,10 +491,10 @@ struct cpqary3_pkt {
 	uint32_t		scb_len;
 	cpqary3_command_t	*cmd_command;
 };
+#endif
 
 /* Driver function definitions */
 
-void cpqary3_init_hbatran(cpqary3_t *);
 void cpqary3_periodic(void *);
 int cpqary3_flush_cache(cpqary3_t *);
 uint16_t cpqary3_init_ctlr_resource(cpqary3_t *);
@@ -498,11 +505,11 @@ int cpqary3_retrieve(cpqary3_t *);
 void cpqary3_retrieve_simple(cpqary3_t *);
 int cpqary3_target_geometry(struct scsi_address *);
 int8_t cpqary3_detect_target_geometry(cpqary3_t *);
-uint8_t cpqary3_send_abortcmd(cpqary3_t *, cpqary3_tgt_t *, cpqary3_command_t *);
+uint8_t cpqary3_send_abortcmd(cpqary3_t *, cpqary3_target_t *, cpqary3_command_t *);
 void cpqary3_memfini(cpqary3_t *, uint8_t);
 int16_t cpqary3_meminit(cpqary3_t *);
 void cpqary3_build_cmdlist(cpqary3_command_t *cpqary3_cmdpvtp,
-    cpqary3_tgt_t *);
+    cpqary3_target_t *);
 void cpqary3_lockup_check(cpqary3_t *);
 void cpqary3_oscmd_complete(cpqary3_command_t *);
 
@@ -555,8 +562,14 @@ cpqary3_volume_t *cpqary3_lookup_volume_by_id(cpqary3_t *, unsigned);
 cpqary3_volume_t *cpqary3_lookup_volume_by_addr(cpqary3_t *,
     struct scsi_address *);
 
-cpqary3_tgt_t *cpqary3_target_from_id(cpqary3_t *, unsigned);
-cpqary3_tgt_t *cpqary3_target_from_addr(cpqary3_t *, struct scsi_address *);
+#if 0
+cpqary3_target_t *cpqary3_target_from_id(cpqary3_t *, unsigned);
+cpqary3_target_t *cpqary3_target_from_addr(cpqary3_t *, struct scsi_address *);
+#endif
+int cpqary3_setcap(struct scsi_address *, char *, int, int);
+int cpqary3_getcap(struct scsi_address *, char *, int);
+
+void cpqary3_hba_setup(cpqary3_t *);
 
 void cpqary3_process_finishq(cpqary3_t *);
 

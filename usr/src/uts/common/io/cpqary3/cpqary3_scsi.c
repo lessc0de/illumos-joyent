@@ -21,6 +21,7 @@
  * Local Functions Definitions
  */
 
+#if 0
 static uint8_t cpqary3_probe4LVs(cpqary3_t *);
 static uint8_t cpqary3_probe4Tapes(cpqary3_t *);
 
@@ -51,95 +52,7 @@ cpqary3_probe4targets(cpqary3_t *cpqary3p)
 
 	return (CPQARY3_SUCCESS);
 }
-
-/*
- * Function	:	cpqary3_build_cmdlist
- * Description	: 	This routine builds the command list for the specific
- *			opcode.
- * Called By	: 	cpqary3_transport()
- * Parameters	: 	cmdlist pvt struct, target id as received by SA.
- * Calls	: 	None
- * Return Values: 	SUCCESS		: 	Build is successful
- *			FAILURE		: 	Build has Failed
- */
-void
-cpqary3_build_cmdlist(cpqary3_command_t *cpcm, cpqary3_tgt_t *tgtp)
-{
-	int		cntr;
-	cpqary3_t	*cpq = cpcm->cpcm_ctlr;
-	CommandList_t	*cmdlistp = cpcm->cpcm_va_cmd;
-	cpqary3_pkt_t	*pkt = cpcm->cpcm_private;
-	struct buf	*bfp = pkt->bf;
-
-	/* Update Cmd Header */
-	cmdlistp->Header.SGList = pkt->cmd_cookiecnt;
-	cmdlistp->Header.SGTotal = pkt->cmd_cookiecnt;
-
-	if (tgtp->type == CPQARY3_TARGET_CTLR) {
-		cmdlistp->Header.LUN.PhysDev.TargetId = 0;
-		cmdlistp->Header.LUN.PhysDev.Bus = 0;
-		cmdlistp->Header.LUN.PhysDev.Mode = MASK_PERIPHERIAL_DEV_ADDR;
-	} else if (tgtp->type == CPQARY3_TARGET_LOG_VOL) {
-		cmdlistp->Header.LUN.LogDev.VolId = tgtp->logical_id;
-		cmdlistp->Header.LUN.LogDev.Mode = LOGICAL_VOL_ADDR;
-	} else if (tgtp->type == CPQARY3_TARGET_TAPE) {
-		bcopy(&(tgtp->PhysID), &(cmdlistp->Header.LUN.PhysDev),
-		    sizeof (PhysDevAddr_t));
-
-		DTRACE_PROBE1(build_cmdlist_tape, CommandList_t *, cmdlistp);
-	} else {
-		dev_err(cpq->dip, CE_PANIC, "unexpected target type: %x",
-		    tgtp->type);
-	}
-
-	/* Cmd Request */
-	cmdlistp->Request.CDBLen = pkt->cdb_len;
-
-	bcopy(pkt->scsi_cmd_pkt->pkt_cdbp, cmdlistp->Request.CDB, pkt->cdb_len);
-
-	cmdlistp->Request.Type.Type = CISS_TYPE_CMD;
-	cmdlistp->Request.Type.Attribute = CISS_ATTR_ORDERED;
-
-	DTRACE_PROBE2(build_cmdlist_buf, struct buf *, bfp,
-	    CommandList_t *, cmdlistp);
-
-	if (bfp && (bfp->b_flags & B_READ))
-		cmdlistp->Request.Type.Direction = CISS_XFER_READ;
-	else if (bfp && (bfp->b_flags & B_WRITE))
-		cmdlistp->Request.Type.Direction = CISS_XFER_WRITE;
-	else
-		cmdlistp->Request.Type.Direction = CISS_XFER_NONE;
-	/*
-	 * Looks like the above Direction is going for a toss in case of
-	 * MSA20(perticularly for 0x0a-write) connected to SMART Array.
-	 * If the above check fails, the below switch should take care.
-	 */
-
-	switch (cmdlistp->Request.CDB[0]) {
-	case 0x08: /* XXX ? */
-	case 0x28: /* XXX ? */
-		cmdlistp->Request.Type.Direction = CISS_XFER_READ;
-		break;
-	case 0x0A: /* XXX ? */
-	case 0x2A: /* XXX ? */
-		cmdlistp->Request.Type.Direction = CISS_XFER_WRITE;
-		break;
-	}
-
-	/*
-	 * NEED to increase this TimeOut value when the concerned
-	 * targets are tape devices(i.e., we need to do it here manually).
-	 */
-	cmdlistp->Request.Timeout = 2 * pkt->scsi_cmd_pkt->pkt_time;
-
-	for (cntr = 0; cntr < pkt->cmd_cookiecnt; cntr++) {
-		cmdlistp->SG[cntr].Addr =
-		    pkt->cmd_dmacookies[cntr].dmac_laddress;
-		cmdlistp->SG[cntr].Len = (uint32_t)
-		    pkt->cmd_dmacookies[cntr].dmac_size;
-	}
-}
-
+#endif
 
 /*
  * Function	: 	cpqary3_send_abortcmd
@@ -153,7 +66,7 @@ cpqary3_build_cmdlist(cpqary3_command_t *cpcm, cpqary3_tgt_t *tgtp)
  *			FAILURE - Could not submit the abort cmd.
  */
 uint8_t
-cpqary3_send_abortcmd(cpqary3_t *cpq, cpqary3_tgt_t *tgtp,
+cpqary3_send_abortcmd(cpqary3_t *cpq, cpqary3_target_t *tgtp,
     cpqary3_command_t *abort_cpcm)
 {
 	CommandList_t *cmdlistp;
@@ -161,15 +74,6 @@ cpqary3_send_abortcmd(cpqary3_t *cpq, cpqary3_tgt_t *tgtp,
 	cpqary3_command_t *cpcm;
 
 	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
-
-	switch (tgtp->type) {
-	case CPQARY3_TARGET_TAPE:
-	case CPQARY3_TARGET_LOG_VOL:
-		break;
-
-	default:
-		return (EINVAL);
-	}
 
 	/*
 	 * Occupy the Command List
@@ -215,21 +119,11 @@ cpqary3_send_abortcmd(cpqary3_t *cpq, cpqary3_tgt_t *tgtp,
 		 */
 		cmdlistp->Request.CDB[1] = CISS_ABORT_TASKSET;
 
-		switch (tgtp->type) {
-		case CPQARY3_TARGET_LOG_VOL:
-			cmdlistp->Header.LUN.LogDev.Mode = LOGICAL_VOL_ADDR;
-			cmdlistp->Header.LUN.LogDev.VolId = tgtp->logical_id;
-			break;
-
-		case CPQARY3_TARGET_TAPE:
-			bcopy(&(tgtp->PhysID), &(cmdlistp->Header.LUN.PhysDev),
-			    sizeof (PhysDevAddr_t));
-			break;
-
-		default:
-			panic("unexpected target type");
-			break;
-		}
+		cmdlistp->Header.LUN.LogDev = tgtp->cptg_volume->cplv_addr;
+#if 0
+		cmdlistp->Header.LUN.LogDev.Mode = LOGICAL_VOL_ADDR;
+		cmdlistp->Header.LUN.LogDev.VolId = tgtp->logical_id;
+#endif
 	}
 
 	if (cpqary3_synccmd_send(cpq, cpcm, 30000,
@@ -287,6 +181,7 @@ cpqary3_flush_cache(cpqary3_t *cpqary3p)
 	return (0);
 }
 
+#if 0
 /*
  * Function	:  	cpqary3_probe4LVs
  * Description	:  	This routine probes for the logical drives
@@ -606,3 +501,4 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	return (CPQARY3_SUCCESS);
 
 }
+#endif

@@ -47,7 +47,7 @@ cpqary3_periodic(void *arg)
 	now = ddi_get_lbolt();
 	for (cpcm = avl_first(&cpq->cpq_inflight); cpcm != NULL;
 	    cpcm = cpcm_next) {
-		cpqary3_pkt_t *privp;
+		cpqary3_command_scsa_t *cpcms;
 		struct scsi_pkt *pkt;
 		clock_t exp;
 
@@ -62,8 +62,8 @@ cpqary3_periodic(void *arg)
 		 * issued on behalf of SCSA.
 		 */
 		if (cpcm->cpcm_type != CPQARY3_CMDTYPE_OS ||
-		    (privp = cpcm->cpcm_private) == NULL ||
-		    (pkt = privp->scsi_cmd_pkt) == NULL) {
+		    (cpcms = cpcm->cpcm_scsa) == NULL ||
+		    (pkt = cpcms->cpcms_pkt) == NULL) {
 			continue;
 		}
 
@@ -138,6 +138,16 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	}
 
 	/*
+	 * XXX Synchronise the Command Block DMA resources to ensure that the
+	 * device has a consistent view before we pass it the address.
+	 */
+	if (ddi_dma_sync(cpcm->cpcm_phyctg.cpqary3_dmahandle, 0,
+	    sizeof (CommandList_t), DDI_DMA_SYNC_FORDEV) != DDI_SUCCESS) {
+		dev_err(cpq->dip, CE_WARN, "DMA sync failure");
+		return (EIO);
+	}
+
+	/*
 	 * Ensure that this command is not re-used without issuing a new
 	 * tag number and performing any appropriate cleanup.
 	 */
@@ -209,6 +219,20 @@ cpqary3_process_finishq(cpqary3_t *cpq)
 			cpqary3_command_free(cpcm);
 			mutex_enter(&cpq->cpq_mutex);
 			continue;
+		}
+
+		/*
+		 * XXX Synchronise the Command Block before we read things
+		 * from it?
+		 */
+		if (ddi_dma_sync(cpcm->cpcm_phyctg.cpqary3_dmahandle, 0,
+		    cpcm->cpcm_phyctg.real_size,
+		    DDI_DMA_SYNC_FORKERNEL) != DDI_SUCCESS) {
+			dev_err(cpq->dip, CE_WARN,
+			    "finishq DMA sync failure");
+			/*
+			 * XXX what to do about this?!
+			 */
 		}
 
 		if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLLED) {

@@ -76,7 +76,8 @@ cpqary3_lookup_inflight(cpqary3_t *cpq, uint32_t tag)
 	return (avl_find(&cpq->cpq_inflight, &srch, NULL));
 }
 
-cpqary3_tgt_t *
+#if 0
+cpqary3_target_t *
 cpqary3_target_from_id(cpqary3_t *cpq, unsigned id)
 {
 	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
@@ -95,7 +96,9 @@ cpqary3_target_from_addr(cpqary3_t *cpq, struct scsi_address *sa)
 
 	return (cpqary3_target_from_id(cpq, sa->a_target));
 }
+#endif
 
+#if 0
 /*
  * Function	: 	cpqary3_target_geometry
  * Description	: 	This function returns the geometry for the target.
@@ -117,6 +120,7 @@ cpqary3_target_geometry(struct scsi_address *sa)
 	return ((tgtp->properties.drive.heads << 16) |
 	    tgtp->properties.drive.sectors);
 }
+#endif
 
 /*
  * Function	:   	cpqary3_synccmd_alloc
@@ -300,6 +304,7 @@ cpqary3_synccmd_send(cpqary3_t *cpqary3p, cpqary3_command_t *cpcm,
 	return (rc);
 }
 
+#if 0
 /*
  * Function	: 	cpqary3_detect_target_geometry
  * Description	: 	This function determines the geometry for all
@@ -433,3 +438,4 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 
 	return (CPQARY3_SUCCESS);
 }
+#endif

@@ -248,14 +248,13 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	    offsetof(cpqary3_command_t, cpcm_link));
 	list_create(&cpq->cpq_finishq, sizeof (cpqary3_command_t),
 	    offsetof(cpqary3_command_t, cpcm_link_finish));
+	list_create(&cpq->cpq_volumes, sizeof (cpqary3_volume_t),
+	    offsetof(cpqary3_volume_t, cplv_link));
 	avl_create(&cpq->cpq_inflight, cpqary3_command_comparator,
 	    sizeof (cpqary3_command_t), offsetof(cpqary3_command_t,
 	    cpcm_node));
 	mutex_init(&cpq->cpq_mutex, NULL, MUTEX_DRIVER, NULL);
 	cv_init(&cpq->cpq_cv_finishq, NULL, CV_DRIVER, NULL);
-	cpq->cpq_targets[CTLR_SCSI_ID] = kmem_zalloc(sizeof (cpqary3_tgt_t),
-	    KM_SLEEP);
-	cpq->cpq_targets[CTLR_SCSI_ID]->type = CPQARY3_TARGET_CTLR;
 
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_BASIC;
 
@@ -298,11 +297,10 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_HBA_ALLOC;
 
 	/*
-	 * Set private field for the HBA tran structure.
-	 * Initialise the HBA tran entry points.
-	 * Attach the controller to HBA.
+	 * XXX This function should do _all_ of the SCSA HBA driver
+	 * init work.
 	 */
-	cpqary3_init_hbatran(cpq);
+	cpqary3_hba_setup(cpq);
 
 	tmp_dma_attr = cpqary3_dma_attr;
 	tmp_dma_attr.dma_attr_sgllen = cpq->cpq_sg_cnt;
@@ -432,15 +430,9 @@ cpqary3_cleanup(cpqary3_t *cpq)
 
 		cv_destroy(&cpq->cpq_cv_finishq);
 
-		for (int targ = 0; targ < CPQARY3_MAX_TGT;  targ++) {
-			if (cpq->cpq_targets[targ] == NULL) {
-				continue;
-			}
-
-			kmem_free(cpq->cpq_targets[targ],
-			    sizeof (cpqary3_tgt_t));
-			cpq->cpq_targets[targ] = NULL;
-		}
+		/*
+		 * XXX cleanup volumes, targets, etc!
+		 */
 
 		/*
 		 * XXX avl_destroy, list_destroy, etc

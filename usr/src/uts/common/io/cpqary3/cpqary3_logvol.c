@@ -35,11 +35,11 @@ cpqary3_lookup_volume_by_addr(cpqary3_t *cpq, struct scsi_address *sa)
 {
 	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
 
-	if (sa->sa_lun != 0) {
+	if (sa->a_lun != 0) {
 		return (NULL);
 	}
 
-	return (cpqary3_lookup_volume_by_id(cpq, sa->sa_target));
+	return (cpqary3_lookup_volume_by_id(cpq, sa->a_target));
 }
 
 static void
@@ -58,8 +58,7 @@ cpqary3_write_lun_addr_phys(LUNAddr_t *lun, boolean_t masked, unsigned bus,
 static int
 cpqary3_read_logvols(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 {
-	cpqary3_report_logical_lun_extent_t *ents =
-	    cprll->cprll_data.ents;
+	cpqary3_report_logical_lun_ent_t *ents = cprll->cprll_data.ents;
 	uint32_t count = ntohl(cprll->cprll_datasize) /
 	    sizeof (cpqary3_report_logical_lun_ent_t);
 
@@ -71,15 +70,15 @@ cpqary3_read_logvols(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 		cpqary3_volume_t *cplv;
 
 		if ((cplv = cpqary3_lookup_volume_by_id(cpq,
-		    ents[i]->cprle_addr.VolId)) != NULL) {
+		    ents[i].cprle_addr.VolId)) != NULL) {
 			continue;
 		}
 
 		dev_err(cpq->dip, CE_WARN, "NEW LOGVOL[%u]: mode %x "
 		    "volid %x attr %x", i,
-		    ents[i]->cprle_addr.Mode,
-		    ents[i]->cprle_addr.VolId,
-		    *((uint32_t *)ents[i]->cprle_addr.reserved));
+		    ents[i].cprle_addr.Mode,
+		    ents[i].cprle_addr.VolId,
+		    *((uint32_t *)ents[i].cprle_addr.reserved));
 
 		/*
 		 * This is a new Logical Volume, so add it the the list.
@@ -88,13 +87,13 @@ cpqary3_read_logvols(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 		    NULL) {
 			return (ENOMEM);
 
-			cplv->cplv_addr = ents[i]->cprle_addr;
+			cplv->cplv_addr = ents[i].cprle_addr;
 
 			list_create(&cplv->cplv_targets,
 			    sizeof (cpqary3_target_t),
 			    offsetof(cpqary3_target_t, cptg_link_volume));
 
-			cplv->cplv_ctrl = cpq;
+			cplv->cplv_ctlr = cpq;
 			list_insert_tail(&cpq->cpq_volumes, cplv);
 		}
 	}
@@ -118,7 +117,7 @@ cpqary3_read_logvols_ext(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 		cpqary3_volume_t *cplv;
 
 		if ((cplv = cpqary3_lookup_volume_by_id(cpq,
-		    ents[i]->cprle_addr.VolId)) != NULL) {
+		    extents[i].cprle_addr.VolId)) != NULL) {
 			/*
 			 * XXX compare previous WWN with current WWN...
 			 */
@@ -127,28 +126,28 @@ cpqary3_read_logvols_ext(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 
 		dev_err(cpq->dip, CE_WARN, "NEW EXT LOGVOL[%u]: mode %x "
 		    "volid %x attr %x", i,
-		    extents[i]->cprle_addr.Mode,
-		    extents[i]->cprle_addr.VolId,
-		    *((uint32_t *)extents[i]->cprle_addr.reserved));
+		    extents[i].cprle_addr.Mode,
+		    extents[i].cprle_addr.VolId,
+		    *((uint32_t *)extents[i].cprle_addr.reserved));
 		dev_err(cpq->dip, CE_WARN, "-- id %02x %02x %02x "
 		    "%02x %02x %02x %02x %02x %02x %02x %02x %02x "
 		    "%02x %02x %02x %02x",
-		    (uint32_t)extents[i]->cprle_wwn[0],
-		    (uint32_t)extents[i]->cprle_wwn[1],
-		    (uint32_t)extents[i]->cprle_wwn[2],
-		    (uint32_t)extents[i]->cprle_wwn[3],
-		    (uint32_t)extents[i]->cprle_wwn[4],
-		    (uint32_t)extents[i]->cprle_wwn[5],
-		    (uint32_t)extents[i]->cprle_wwn[6],
-		    (uint32_t)extents[i]->cprle_wwn[7],
-		    (uint32_t)extents[i]->cprle_wwn[8],
-		    (uint32_t)extents[i]->cprle_wwn[9],
-		    (uint32_t)extents[i]->cprle_wwn[10],
-		    (uint32_t)extents[i]->cprle_wwn[11],
-		    (uint32_t)extents[i]->cprle_wwn[12],
-		    (uint32_t)extents[i]->cprle_wwn[13],
-		    (uint32_t)extents[i]->cprle_wwn[14],
-		    (uint32_t)extents[i]->cprle_wwn[15]);
+		    (uint32_t)extents[i].cprle_wwn[0],
+		    (uint32_t)extents[i].cprle_wwn[1],
+		    (uint32_t)extents[i].cprle_wwn[2],
+		    (uint32_t)extents[i].cprle_wwn[3],
+		    (uint32_t)extents[i].cprle_wwn[4],
+		    (uint32_t)extents[i].cprle_wwn[5],
+		    (uint32_t)extents[i].cprle_wwn[6],
+		    (uint32_t)extents[i].cprle_wwn[7],
+		    (uint32_t)extents[i].cprle_wwn[8],
+		    (uint32_t)extents[i].cprle_wwn[9],
+		    (uint32_t)extents[i].cprle_wwn[10],
+		    (uint32_t)extents[i].cprle_wwn[11],
+		    (uint32_t)extents[i].cprle_wwn[12],
+		    (uint32_t)extents[i].cprle_wwn[13],
+		    (uint32_t)extents[i].cprle_wwn[14],
+		    (uint32_t)extents[i].cprle_wwn[15]);
 
 		/*
 		 * This is a new Logical Volume, so add it the the list.
@@ -157,16 +156,16 @@ cpqary3_read_logvols_ext(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 		    NULL) {
 			return (ENOMEM);
 
-			cplv->cplv_addr = ents[i]->cprle_addr;
+			cplv->cplv_addr = extents[i].cprle_addr;
 
-			bcopy(extents[i]->cprle_wwn, cplv->cplv_addr, 16);
+			bcopy(extents[i].cprle_wwn, cplv->cplv_wwn, 16);
 			cplv->cplv_flags |= CPQARY3_VOL_FLAG_WWN;
 
 			list_create(&cplv->cplv_targets,
 			    sizeof (cpqary3_target_t),
 			    offsetof(cpqary3_target_t, cptg_link_volume));
 
-			cplv->cplv_ctrl = cpq;
+			cplv->cplv_ctlr = cpq;
 			list_insert_tail(&cpq->cpq_volumes, cplv);
 		}
 	}
