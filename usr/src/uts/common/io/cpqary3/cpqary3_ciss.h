@@ -81,9 +81,9 @@ extern "C" {
  * at offset 34h.
  *
  * This ill-fated attempt to increase the proprietary complexity of (and
- * presumably, thus, the gross margin on) computer systems folded at the turn
- * of the century.  The transport layer of this storage controller is all
- * that's left of their religion.
+ * presumably, thus, the gross margin on) computer systems is all but extinct.
+ * The transport layer of this storage controller is all that's left of their
+ * religion.
  */
 #define	CISS_I2O_INBOUND_DOORBELL		0x20
 #define	CISS_I2O_INTERRUPT_STATUS		0x30

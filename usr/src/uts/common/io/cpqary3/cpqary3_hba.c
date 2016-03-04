@@ -157,8 +157,9 @@ cpqary3_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 	}
 	cpcm->cpcm_scsa = cpcms;
 	cpcms->cpcms_command = cpcm;
+	cpcms->cpcms_pkt = pkt;
 
-	pkt->pkt_cdbp = &cpcm->cpcm_va_cmd->Request.CDB[16];
+	pkt->pkt_cdbp = cpcm->cpcm_va_cmd->Request.CDB;
 	cpcm->cpcm_va_cmd->Request.CDBLen = pkt->pkt_cdblen;
 
 	pkt->pkt_scbp = (uchar_t *)&cpcm->cpcm_va_err->SenseInfo;
@@ -194,6 +195,24 @@ cpqary3_tran_teardown_pkt(struct scsi_pkt *pkt)
 	pkt->pkt_scbp = NULL;
 }
 
+static void
+cpqary3_set_arq_data(struct scsi_pkt *pkt, uchar_t key)
+{
+	struct scsi_arq_status *arqstat;
+
+	arqstat = (struct scsi_arq_status *)(pkt->pkt_scbp);
+
+	arqstat->sts_status.sts_chk = 1; /* CHECK CONDITION */
+	arqstat->sts_rqpkt_reason = CMD_CMPLT;
+	arqstat->sts_rqpkt_resid = 0;
+	arqstat->sts_rqpkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
+	    STATE_SENT_CMD | STATE_XFERRED_DATA;
+	arqstat->sts_rqpkt_statistics = 0;
+	arqstat->sts_sensedata.es_valid = 1;
+	arqstat->sts_sensedata.es_class = CLASS_EXTENDED_SENSE;
+	arqstat->sts_sensedata.es_key = key;
+}
+
 static int
 cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 {
@@ -203,6 +222,37 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 	    pkt->pkt_ha_private;
 	cpqary3_command_t *cpcm = cpcms->cpcms_command;
 	int r;
+
+	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_TRAN_START) {
+		/*
+		 * This is a retry of a command that has already been
+		 * used once.  Assign it a new tag number.
+		 */
+		cpqary3_command_reuse(cpcm);
+	}
+	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_TRAN_START;
+
+	/*
+	 * The sophisticated firmware in this controller cannot possibly bear
+	 * the following SCSI commands.  It appears to return a response with
+	 * the status STATUS_ACA_ACTIVE (0x30), which is not something we
+	 * expect.  Instead, fake up a failure response.
+	 */
+	switch (pkt->pkt_cdbp[0]) {
+	case SCMD_FORMAT:
+	case SCMD_LOG_SENSE_G1:
+	case SCMD_MODE_SELECT:
+	case SCMD_PERSISTENT_RESERVE_IN:
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_TRAN_IGNORED;
+		dev_err(cpq->dip, CE_WARN, "ignored SCSI cmd %02x",
+		    (unsigned)pkt->pkt_cdbp[0]); /* XXX */
+		cpqary3_set_arq_data(pkt, KEY_ILLEGAL_REQUEST);
+		pkt->pkt_reason = CMD_BADMSG;
+		pkt->pkt_state |= STATE_GOT_BUS | STATE_GOT_TARGET |
+		    STATE_SENT_CMD | STATE_XFERRED_DATA;
+		scsi_hba_pkt_comp(pkt);
+		return (TRAN_ACCEPT);
+	}
 
 	if (pkt->pkt_flags & FLAG_NOINTR) {
 		/*
@@ -220,6 +270,8 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 		/*
 		 * More DMA cookies than we are prepared to handle.
 		 */
+		dev_err(cpq->dip, CE_WARN, "too many DMA cookies (got %u;"
+		    " expected %u)", pkt->pkt_numcookies, cpq->cpq_sg_cnt);
 		return (TRAN_BADPKT);
 	}
 	cpcm->cpcm_va_cmd->Header.SGList = pkt->pkt_numcookies;
@@ -301,12 +353,19 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 	if ((r = cpqary3_submit(cpq, cpcm)) != 0) {
 		mutex_exit(&cpq->cpq_mutex);
 
+		dev_err(cpq->dip, CE_WARN, "cpqary3_submit failed %d", r);
+
 		/*
 		 * Inform the SCSI framework that we could not submit
 		 * the command.
 		 */
 		return (r == EAGAIN ? TRAN_BUSY : TRAN_FATAL_ERROR);
 	}
+
+	dev_err(cpq->dip, CE_WARN, "SCSI OUT targ %3x opcode %x len %u",
+	    cpcm->cpcm_target->cptg_scsi_dev->sd_address.a_target,
+	    (unsigned)cpcm->cpcm_va_cmd->Request.CDB[0],
+	    pkt->pkt_cdblen);
 
 	/*
 	 * Update the SCSI packet to reflect submission of the command.

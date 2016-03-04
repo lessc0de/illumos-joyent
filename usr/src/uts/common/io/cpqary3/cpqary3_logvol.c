@@ -86,16 +86,16 @@ cpqary3_read_logvols(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 		if ((cplv = kmem_zalloc(sizeof (*cplv), KM_NOSLEEP)) ==
 		    NULL) {
 			return (ENOMEM);
-
-			cplv->cplv_addr = ents[i].cprle_addr;
-
-			list_create(&cplv->cplv_targets,
-			    sizeof (cpqary3_target_t),
-			    offsetof(cpqary3_target_t, cptg_link_volume));
-
-			cplv->cplv_ctlr = cpq;
-			list_insert_tail(&cpq->cpq_volumes, cplv);
 		}
+
+		cplv->cplv_addr = ents[i].cprle_addr;
+
+		list_create(&cplv->cplv_targets,
+		    sizeof (cpqary3_target_t),
+		    offsetof(cpqary3_target_t, cptg_link_volume));
+
+		cplv->cplv_ctlr = cpq;
+		list_insert_tail(&cpq->cpq_volumes, cplv);
 	}
 
 	return (0);
@@ -155,19 +155,19 @@ cpqary3_read_logvols_ext(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 		if ((cplv = kmem_zalloc(sizeof (*cplv), KM_NOSLEEP)) ==
 		    NULL) {
 			return (ENOMEM);
-
-			cplv->cplv_addr = extents[i].cprle_addr;
-
-			bcopy(extents[i].cprle_wwn, cplv->cplv_wwn, 16);
-			cplv->cplv_flags |= CPQARY3_VOL_FLAG_WWN;
-
-			list_create(&cplv->cplv_targets,
-			    sizeof (cpqary3_target_t),
-			    offsetof(cpqary3_target_t, cptg_link_volume));
-
-			cplv->cplv_ctlr = cpq;
-			list_insert_tail(&cpq->cpq_volumes, cplv);
 		}
+
+		cplv->cplv_addr = extents[i].cprle_addr;
+
+		bcopy(extents[i].cprle_wwn, cplv->cplv_wwn, 16);
+		cplv->cplv_flags |= CPQARY3_VOL_FLAG_WWN;
+
+		list_create(&cplv->cplv_targets,
+		    sizeof (cpqary3_target_t),
+		    offsetof(cpqary3_target_t, cptg_link_volume));
+
+		cplv->cplv_ctlr = cpq;
+		list_insert_tail(&cpq->cpq_volumes, cplv);
 	}
 
 	return (0);
@@ -220,7 +220,6 @@ cpqary3_discover_logical_volumes(cpqary3_t *cpq, int timeout)
 	cprllr.cprllr_datasize = htonl(sizeof (cpqary3_report_logical_lun_t));
 	bcopy(&cprllr, cl->Request.CDB, 16);
 
-	dev_err(cpq->dip, CE_WARN, "send: REPORT LOGICAL LUNs");
 	if (cpqary3_synccmd_send(cpq, cpcm, timeout * 1000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
 		cpqary3_synccmd_free(cpq, cpcm);
@@ -242,12 +241,8 @@ cpqary3_discover_logical_volumes(cpqary3_t *cpq, int timeout)
 
 	mutex_enter(&cpq->cpq_mutex);
 	if ((cprll->cprll_extflag & 0x1) != 0) {
-		dev_err(cpq->dip, CE_WARN, "LOG LUNS: EXT RESPONSE!");
-
 		r = cpqary3_read_logvols_ext(cpq, cprll);
 	} else {
-		dev_err(cpq->dip, CE_WARN, "LOG LUNS: NORMAL RESPONSE!");
-
 		r = cpqary3_read_logvols(cpq, cprll);
 	}
 	mutex_exit(&cpq->cpq_mutex);

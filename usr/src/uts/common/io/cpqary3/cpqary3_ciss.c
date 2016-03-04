@@ -151,7 +151,7 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	 * Ensure that this command is not re-used without issuing a new
 	 * tag number and performing any appropriate cleanup.
 	 */
-	VERIFY(!(cpcm->cpcm_status & ~CPQARY3_CMD_STATUS_USED));
+	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_USED));
 	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_USED;
 
 	/*

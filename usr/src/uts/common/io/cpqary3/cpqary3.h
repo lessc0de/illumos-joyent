@@ -397,6 +397,9 @@ typedef enum cpqary3_command_status {
 	CPQARY3_CMD_STATUS_POLLED =		(0x1 << 6),
 	CPQARY3_CMD_STATUS_POLL_COMPLETE =	(0x1 << 7),
 	CPQARY3_CMD_STATUS_ABORT_SENT =		(0x1 << 8),
+	CPQARY3_CMD_STATUS_TRAN_START =		(0x1 << 9),
+	CPQARY3_CMD_STATUS_TRAN_IGNORED =	(0x1 << 10),
+	CPQARY3_CMD_STATUS_REUSED =		(0x1 << 11),
 } cpqary3_command_status_t;
 
 typedef enum cpqary3_command_type {
@@ -456,7 +459,6 @@ struct cpqary3_command_internal {
  */
 struct cpqary3_command_scsa {
 	struct scsi_pkt		*cpcms_pkt;
-	int			cpcms_flags;
 	cpqary3_command_t	*cpcms_command;
 };
 

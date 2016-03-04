@@ -324,9 +324,10 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 
 	/*
 	 * Register a periodic function to be called every 15 seconds.
+	 * XXX (1 second at the moment)
 	 */
 	cpq->cpq_periodic = ddi_periodic_add(cpqary3_periodic, cpq,
-	    15 * NANOSEC, DDI_IPL_0);
+	    1 * NANOSEC, DDI_IPL_0);
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_PERIODIC;
 
 	/* Report that an Instance of the Driver is Attached Successfully */

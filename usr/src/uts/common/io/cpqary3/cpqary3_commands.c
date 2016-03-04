@@ -144,18 +144,11 @@ cpqary3_command_reuse(cpqary3_command_t *cpcm)
 	mutex_enter(&cpq->cpq_mutex);
 
 	/*
-	 * Make sure the command is not currently inflight.
+	 * Make sure the command is not currently inflight, then
+	 * reset the command status.
 	 */
 	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT));
-	if (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_USED)) {
-		/*
-		 * If the command has not yet been issued to the controller,
-		 * this is a no-op.
-		 */
-		mutex_exit(&cpq->cpq_mutex);
-		return;
-	}
-	cpcm->cpcm_status &= ~CPQARY3_CMD_STATUS_USED;
+	cpcm->cpcm_status = CPQARY3_CMD_STATUS_REUSED;
 
 	cpqary3_set_new_tag(cpq, cpcm);
 
