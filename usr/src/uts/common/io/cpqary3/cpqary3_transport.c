@@ -25,19 +25,19 @@ static int cpqary3_tgt_init(dev_info_t *, dev_info_t *, scsi_hba_tran_t *,
     struct scsi_device *);
 static int cpqary3_tgt_probe(struct scsi_device *, int (*)());
 static int cpqary3_tran_start(struct scsi_address *, struct scsi_pkt *);
-static int cpqary3_reset(struct scsi_address *, int);
-static int cpqary3_abort(struct scsi_address *, struct scsi_pkt *);
+static int cpqary3_tran_reset(struct scsi_address *, int);
+static int cpqary3_tran_abort(struct scsi_address *, struct scsi_pkt *);
 static int cpqary3_getcap(struct scsi_address *, char *, int);
 static int cpqary3_setcap(struct scsi_address *, char *, int, int);
 static int cpqary3_dma_alloc(cpqary3_t *, struct scsi_pkt *,
     struct buf *, int, int (*)());
 static int cpqary3_dma_move(struct scsi_pkt *, struct buf *, cpqary3_t *);
 static int cpqary3_handle_flag_nointr(cpqary3_command_t *, struct scsi_pkt *);
-static int cpqary3_poll(cpqary3_t *, uint32_t);
 static void cpqary3_dmafree(struct scsi_address *, struct scsi_pkt *);
 static void cpqary3_dma_sync(struct scsi_address *, struct scsi_pkt *);
-static void cpqary3_destroy_pkt(struct scsi_address *, struct scsi_pkt *);
-static struct scsi_pkt *cpqary3_init_pkt(struct scsi_address *,
+static void cpqary3_tran_destroy_pkt(struct scsi_address *,
+    struct scsi_pkt *);
+static struct scsi_pkt *cpqary3_tran_init_pkt(struct scsi_address *,
     struct scsi_pkt *, struct buf *, int, int, int, int, int (*callback)(),
     caddr_t);
 static int cpqary3_additional_cmd(struct scsi_pkt *scsi_pktp, cpqary3_t *);
@@ -52,11 +52,7 @@ extern ddi_dma_attr_t cpqary3_dma_attr;
 void
 cpqary3_init_hbatran(cpqary3_t *cpq)
 {
-	scsi_hba_tran_t	*hba_tran;
-
-	ASSERT(ctlr != NULL);
-
-	hba_tran = cpq->cpq_hba_tran;
+	scsi_hba_tran_t	*hba_tran = cpq->cpq_hba_tran;
 
 	/*
 	 * Memory for the transport vector has been allocated by now.
@@ -70,8 +66,8 @@ cpqary3_init_hbatran(cpqary3_t *cpq)
 	hba_tran->tran_tgt_probe = cpqary3_tgt_probe;
 
 	/* Resource Allocation */
-	hba_tran->tran_init_pkt = cpqary3_init_pkt;
-	hba_tran->tran_destroy_pkt = cpqary3_destroy_pkt;
+	hba_tran->tran_init_pkt = cpqary3_tran_init_pkt;
+	hba_tran->tran_destroy_pkt = cpqary3_tran_destroy_pkt;
 	hba_tran->tran_sync_pkt = cpqary3_dma_sync;
 	hba_tran->tran_dmafree = cpqary3_dmafree;
 
@@ -83,8 +79,8 @@ cpqary3_init_hbatran(cpqary3_t *cpq)
 	hba_tran->tran_setcap = cpqary3_setcap;
 
 	/* Abort and Reset */
-	hba_tran->tran_reset = cpqary3_reset;
-	hba_tran->tran_abort = cpqary3_abort;
+	hba_tran->tran_reset = cpqary3_tran_reset;
+	hba_tran->tran_abort = cpqary3_tran_abort;
 }
 
 /* ARGSUSED */
@@ -95,10 +91,10 @@ cpqary3_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	uint32_t	tid = SD2TGT(sd);
 	uint32_t	lun = SD2LUN(sd);
 	cpqary3_t	*ctlr;
+	cpqary3_tgt_t *tgtp;
 
 	ctlr = (cpqary3_t *)hba_tran->tran_hba_private;
 
-	extern int8_t	cpqary3_detect_target_geometry(cpqary3_t *);
 	if ((CPQARY3_SUCCESS == cpqary3_probe4targets(ctlr)) &&
 	    (ctlr->cpq_ntargets > 0)) {
 		(void) cpqary3_detect_target_geometry(ctlr);
@@ -124,23 +120,36 @@ cpqary3_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	 * is target does not exist, return FAILURE
 	 */
 
-	mutex_enter(&ctlr->sw_mutex);
+	mutex_enter(&ctlr->cpq_mutex);
 
-	if (!(ctlr->cpqary3_tgtp[tid])) {
-		mutex_exit(&ctlr->sw_mutex);
+	if ((tgtp = cpqary3_target_from_id(ctlr, tid)) == NULL) {
+		mutex_exit(&ctlr->cpq_mutex);
 		return (DDI_FAILURE);
 	}
 
-	ctlr->cpqary3_tgtp[tid]->tgt_dip = tgt_dip;
-	ctlr->cpqary3_tgtp[tid]->ctlr_flags = CPQARY3_CAP_DISCON_ENABLED |
+	tgtp->tgt_dip = tgt_dip;
+	tgtp->ctlr_flags = CPQARY3_CAP_DISCON_ENABLED |
 	    CPQARY3_CAP_SYNC_ENABLED | CPQARY3_CAP_WIDE_XFER_ENABLED |
 	    CPQARY3_CAP_ARQ_ENABLED;
 
-	mutex_exit(&ctlr->sw_mutex);
+	mutex_exit(&ctlr->cpq_mutex);
 
 	DTRACE_PROBE1(tgt_init_done, uint32_t, tid);
 
 	return (DDI_SUCCESS);
+}
+
+void
+cpqary3_tgt_free(dev_info_t *hba_dip, dev_info_t *tgt_dip,
+    scsi_hba_tran_t *hba_tran, struct scsi_device *sd)
+{
+	cpqary3_t *cpq = (cpqary3_t *)hba_tran->tran_hba_private;
+
+	mutex_enter(&cpq->cpq_mutex);
+	/*
+	 * XXX
+	 */
+	mutex_exit(&cpq->cpq_mutex);
 }
 
 static int
@@ -164,104 +173,77 @@ cpqary3_tgt_probe(struct scsi_device *sd, int (*waitfunc)())
 	return (scsi_hba_probe(sd, waitfunc));
 }
 
-/*
- * Function	:	cpqary3_init_pkt
- * Description	: 	This routine allocates resources for a SCSI packet.
- * Called By	:  	cpqary3_init_pkt()
- * Parameters	: 	SCSI address, SCSI packet, buffer, CDB length,
- *			SCB length, driver private length, flags modifier,
- *			callback function, arguement for the callback function
- * Calls	: 	cpqary3_dma_alloc(), cpqary3_dma_move()
- * Return Values: 	allocated SCSI packet / NULL
- */
 /* ARGSUSED */
 static struct scsi_pkt *
-cpqary3_init_pkt(struct scsi_address *sa, struct scsi_pkt *scsi_pktp,
+cpqary3_tran_init_pkt(struct scsi_address *sa, struct scsi_pkt *scsi_pktp,
     struct buf *bp, int cmdlen, int statuslen, int tgtlen,
     int flags, int (*callback)(), caddr_t arg)
 {
-	cpqary3_t	*cpqary3p;
-	dev_info_t	*dip;
-	cpqary3_pkt_t	*cpqary3_pktp;
+	cpqary3_t *cpq = SA2CTLR(sa);
+	boolean_t allocated_packet = B_FALSE;
+
+	cpqary3_pkt_t	*privp;
 	struct scsi_pkt	*new_scsi_pktp;
 
 	ASSERT(callback == NULL_FUNC || callback == SLEEP_FUNC);
 
-	cpqary3p = SA2CTLR(sa);
-	dip = cpqary3p->dip;
-
-	/*
-	 * If the SCSI packet is NULL, allocate frresh resources to it.
-	 * Else, get the next available resources for the same
-	 */
-
 	if (scsi_pktp == NULL) {
-		scsi_pktp = scsi_hba_pkt_alloc(dip, sa, cmdlen, statuslen,
-		    tgtlen, sizeof (cpqary3_pkt_t), callback, NULL);
-		if (!scsi_pktp)
+		/*
+		 * The framework requires we allocate a new packet
+		 * structure via scsi_hba_pkt_alloc(9F).
+		 */
+		if ((scsi_pktp = scsi_hba_pkt_alloc(cpq->dip, sa, cmdlen,
+		    statuslen, tgtlen, sizeof (cpqary3_pkt_t), callback,
+		    NULL)) == NULL) {
 			return (NULL);
-
-		cpqary3_pktp = (cpqary3_pkt_t *)scsi_pktp->pkt_ha_private;
-		bzero(cpqary3_pktp, sizeof (cpqary3_pkt_t));
-
-		cpqary3_pktp->scsi_cmd_pkt = scsi_pktp;
-
-		/*
-		 * Store the CDB length and sense data length in the
-		 * pkt private
-		 */
-		cpqary3_pktp->cdb_len = cmdlen;
-		cpqary3_pktp->scb_len = statuslen;
-		cpqary3_pktp->cmd_dmahandle = NULL;
-		cpqary3_pktp->cmd_command = NULL;
-
-		/*
-		 * Initialize to NULL all the fields of scsi_pktp, except
-		 * pkt_scbp, pkt_cdbp, pkt_ha_private and pkt_private members.
-		 */
-		scsi_pktp->pkt_address = *sa;
-		scsi_pktp->pkt_comp = (void (*) ())NULL;
-		scsi_pktp->pkt_flags = 0;
-		scsi_pktp->pkt_time = 0;
-		scsi_pktp->pkt_resid = 0;
-		scsi_pktp->pkt_statistics = 0;
-		scsi_pktp->pkt_state = 0;
-		scsi_pktp->pkt_reason = 0;
-
-		if (flags & PKT_CONSISTENT)
-			cpqary3_pktp->cmd_flags |=  DDI_DMA_CONSISTENT;
-
-		if (flags & PKT_DMA_PARTIAL)
-			cpqary3_pktp->cmd_flags |= DDI_DMA_PARTIAL;
-
-		new_scsi_pktp = scsi_pktp;
-	} else {
-		new_scsi_pktp = NULL;
-		cpqary3_pktp = (cpqary3_pkt_t *)scsi_pktp->pkt_ha_private;
+		}
+		allocated_packet = B_TRUE;
 	}
 
-	cpqary3_pktp->bf = bp;
+	privp = (cpqary3_pkt_t *)scsi_pktp->pkt_ha_private;
 
-	/*
-	 * If any I/O is desired, Allocate/Move DMA resources for the SCSI
-	 * packet
-	 * If first time allocation for this SCSI packet, allocate fresh DMA
-	 * Else, move the already allocated DMA resources
-	 */
-	if (bp && bp->b_bcount != 0) { /* I/O is desired */
-		if (!cpqary3_pktp->cmd_dmahandle) { /* First time allocation */
-			if (cpqary3_dma_alloc(cpqary3p, scsi_pktp,
-			    bp, flags, callback) == CPQARY3_FAILURE) {
-				if (new_scsi_pktp)
-					scsi_hba_pkt_free(sa, new_scsi_pktp);
-				return ((struct scsi_pkt *)NULL);
-			}
-		} else {
-			ASSERT(new_scsi_pktp == NULL);
-			if (CPQARY3_FAILURE ==
-			    cpqary3_dma_move(scsi_pktp, bp, cpqary3p)) {
-				return ((struct scsi_pkt *)NULL);
-			}
+	if (allocated_packet) {
+		/*
+		 * Our private SCSI packet object was just allocated by
+		 * scsi_hba_pkt_alloc(9F).  Initialise it:
+		 */
+		bzero(privp, sizeof (*privp));
+
+		/*
+		 * Link our private point back to the SCSI framework
+		 * packet object, and include the CDB/SCB lengths we
+		 * have been passed.
+		 */
+		privp->scsi_cmd_pkt = scsi_pktp;
+		privp->cdb_len = cmdlen;
+		privp->scb_len = statuslen;
+
+		if (flags & PKT_DMA_PARTIAL) {
+			privp->cmd_flags |= DDI_DMA_PARTIAL;
+		}
+	}
+
+	if (bp != NULL && allocated_packet) {
+		/*
+		 * This is a new packet with an associated buffer.  The
+		 * framework requires us to allocate appropriate DMA
+		 * resources.
+		 */
+		privp->bf = bp;
+		if (cpqary3_dma_alloc(cpq, scsi_pktp, bp, flags,
+		    callback) != DDI_SUCCESS) {
+			scsi_hba_pkt_free(sa, scsi_pktp);
+			return (NULL);
+		}
+	} else if (bp != NULL && !allocated_packet &&
+	    (flags & PKT_DMA_PARTIAL) != 0) {
+		/*
+		 * This is not a new packet, but a buffer was passed in and we
+		 * had previously allocated DMA resources.  This is a request
+		 * from the framework to move the DMA resources.
+		 */
+		if (cpqary3_dma_move(scsi_pktp, bp, cpq) != DDI_SUCCESS) {
+			return (NULL);
 		}
 	}
 
@@ -528,9 +510,6 @@ cpqary3_set_arq_data(struct scsi_pkt *pkt, uchar_t key)
 	arqstat->sts_sensedata.es_valid = 1;
 	arqstat->sts_sensedata.es_class = CLASS_EXTENDED_SENSE;
 	arqstat->sts_sensedata.es_key = key;
-
-	pkt->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-	    STATE_SENT_CMD | STATE_XFERRED_DATA;
 }
 
 static int
@@ -546,14 +525,23 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 	/*
 	 * Determine the target to which this command is addressed.
 	 */
-	if (SA2TGT(sa) >= CPQARY3_MAX_TGT ||
-	    (tgtp = cpq->cpqary3_tgtp[SA2TGT(sa)]) == NULL ||
+	if ((tgtp = cpqary3_target_from_addr(cpq, sa)) == NULL ||
 	    tgtp->type == CPQARY3_TARGET_NONE) {
 		/*
 		 * This target does not exist.
 		 */
 		return (TRAN_FATAL_ERROR);
 	}
+
+	/*
+	 * Initialise the SCSI packet as described in tran_start(9E).  We will
+	 * progressively update these fields as the command moves through the
+	 * submission and completion states.
+	 */
+	scsi_pktp->pkt_resid = 0;
+	scsi_pktp->pkt_reason = CMD_CMPLT;
+	scsi_pktp->pkt_statistics = 0;
+	scsi_pktp->pkt_state = 0;
 
 	/*
 	 * Check to see if we need any special handling for this SCSI
@@ -569,7 +557,10 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 		 * controller firmware.
 		 */
 		cpqary3_set_arq_data(scsi_pktp, KEY_ILLEGAL_REQUEST);
-		if (!nointr) {
+		scsi_pktp->pkt_reason = CMD_BADMSG;
+		scsi_pktp->pkt_state |= STATE_GOT_BUS | STATE_GOT_TARGET |
+		    STATE_SENT_CMD | STATE_XFERRED_DATA;
+		if (!nointr && scsi_pktp->pkt_comp != NULL) {
 			(*scsi_pktp->pkt_comp)(scsi_pktp);
 		}
 		return (TRAN_ACCEPT);
@@ -579,20 +570,18 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 		 * Emulate SYNCHRONIZE CACHE with the BMIC Flush Cache
 		 * command.
 		 */
+		scsi_pktp->pkt_state |= STATE_GOT_BUS | STATE_GOT_TARGET |
+		    STATE_SENT_CMD;
 		if ((r = cpqary3_flush_cache(cpq)) == ENOMEM) {
 			return (TRAN_BUSY);
 		} else if (r != 0) {
 			scsi_pktp->pkt_reason = CMD_TIMEOUT;
-			scsi_pktp->pkt_statistics = STAT_TIMEOUT;
-			scsi_pktp->pkt_state = 0;
+			scsi_pktp->pkt_statistics |= STAT_TIMEOUT;
 		} else {
-			scsi_pktp->pkt_reason = CMD_CMPLT;
-			scsi_pktp->pkt_statistics = 0;
-			scsi_pktp->pkt_state = STATE_GOT_BUS |
-			    STATE_GOT_TARGET | STATE_SENT_CMD |
-			    STATE_XFERRED_DATA | STATE_GOT_STATUS;
+			scsi_pktp->pkt_state |= STATE_XFERRED_DATA |
+			    STATE_GOT_STATUS;
 		}
-		if (!nointr) {
+		if (!nointr && scsi_pktp->pkt_comp != NULL) {
 			(*scsi_pktp->pkt_comp)(scsi_pktp);
 		}
 		return (TRAN_ACCEPT);
@@ -609,39 +598,63 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 	}
 	cpcm->cpcm_private = privp;
 	privp->cmd_command = cpcm;
+	if (nointr) {
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_POLLED;
+	}
 
-	if ((privp->cmd_flags & DDI_DMA_CONSISTENT) && privp->cmd_dmahandle) {
+	if ((privp->cmd_flags & CFLAG_CMDIOPB) && privp->cmd_dmahandle) {
 		(void) ddi_dma_sync(privp->cmd_dmahandle, 0, 0,
 		    DDI_DMA_SYNC_FORDEV);
 	}
 
+	/*
+	 * Build the command to send to the controller based on the SCSI
+	 * packet passed in by the framework.
+	 */
 	VERIFY(privp->cmd_cookiecnt <= cpq->cpq_sg_cnt);
+	cpqary3_build_cmdlist(cpcm, tgtp);
 
-	if (cpqary3_build_cmdlist(cpcm, SA2TGT(sa)) != CPQARY3_SUCCESS) {
-		goto fail;
-	}
+	mutex_enter(&cpq->cpq_mutex);
+	if ((r = cpqary3_submit(cpq, cpcm)) != 0) {
+		mutex_exit(&cpq->cpq_mutex);
 
-	if (nointr) {
 		/*
-		 * This command was issued with the FLAG_NOINTR flag, so
-		 * perform the necessary polling to collect the response
-		 * synchronously.
+		 * The command could not be submitted, so free it now.
 		 */
-		return (cpqary3_handle_flag_nointr(cpcm, scsi_pktp));
+		cpqary3_command_free(cpcm);
+
+		/*
+		 * Inform the SCSI framework that we could not submit
+		 * the command.
+		 */
+		return (r == EAGAIN ? TRAN_BUSY : TRAN_FATAL_ERROR);
 	}
 
-	mutex_enter(&cpq->hw_mutex);
-	r = cpqary3_submit(cpq, cpcm);
-	mutex_exit(&cpq->hw_mutex);
-	if (r != 0) {
-		goto fail;
+	/*
+	 * Update the SCSI packet to reflect submission of the command.
+	 */
+	scsi_pktp->pkt_state |= STATE_GOT_BUS | STATE_GOT_TARGET |
+	    STATE_SENT_CMD;
+
+	if (!nointr) {
+		/*
+		 * This is a regular command submission, so we return
+		 * without polling for completion.
+		 */
+		mutex_exit(&cpq->cpq_mutex);
+		return (TRAN_ACCEPT);
 	}
 
+	/*
+	 * Poll the controller for completion of the command we submitted.
+	 * Once this routine has returned, the completion callback will have
+	 * been fired with either an active response (success or error) or a
+	 * timeout.  The command is freed by the completion callback, so it
+	 * may not be referenced again after this call returns.
+	 */
+	cpqary3_poll_for(cpq, cpcm);
+	mutex_exit(&cpq->cpq_mutex);
 	return (TRAN_ACCEPT);
-
-fail:
-	cpqary3_command_free(cpcm);
-	return (TRAN_FATAL_ERROR);
 }
 
 /*
@@ -719,7 +732,7 @@ cpqary3_dma_sync(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
  * Return Values: 	None
  */
 static void
-cpqary3_destroy_pkt(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
+cpqary3_tran_destroy_pkt(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 {
 	cpqary3_pkt_t	*cpqary3_pktp;
 
@@ -748,22 +761,20 @@ cpqary3_destroy_pkt(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 }
 
 /*
- * Function	:	cpqary3_reset
- * Description	: 	This routine resets a SCSI bus/target.
- * Called By	: 	kernel
- * Parameters	: 	SCSI address, reset level required
- * Calls	: 	None
- * Return Values: 	SUCCESS
+ * The tran_reset(9E) entry point is called when the SCSI framework wishes us
+ * to reset the SCSI bus (RESET_ALL), a particular target (RESET_TARGET), or a
+ * particular logical unit (RESET_LUN).
+ *
+ * On success, return 1; on failure, return 0.
  */
-/* ARGSUSED */
 static int
-cpqary3_reset(struct scsi_address *sa, int level)
+cpqary3_tran_reset(struct scsi_address *sa, int level)
 {
 	/*
-	 * Fix for Crash seen during RAID 0 Drive removal -
-	 * just return CPQARY3_SUCCESS on reset request
+	 * We currently have no support for resetting the controller.
+	 * Signal universal failure to the SCSI framework.
 	 */
-	return (CPQARY3_SUCCESS);
+	return (0);
 }
 
 /*
@@ -778,11 +789,18 @@ cpqary3_reset(struct scsi_address *sa, int level)
  *			a failure. ]
  */
 static int
-cpqary3_abort(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
+cpqary3_tran_abort(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 {
-	uint32_t tid = SA2TGT(sa);
 	cpqary3_t *cpq = SA2CTLR(sa);
-	CommandList_t *clp = NULL;
+	cpqary3_command_t *cpcm = NULL;
+	cpqary3_tgt_t *tgtp;
+	int r;
+
+	mutex_enter(&cpq->cpq_mutex);
+
+	if ((tgtp = cpqary3_target_from_addr(cpq, sa)) == NULL) {
+		return (0);
+	}
 
 	/*
 	 * If SCSI packet exists, abort that particular command.
@@ -794,10 +812,13 @@ cpqary3_abort(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 		cpqary3_pkt_t *pktp = (cpqary3_pkt_t *)scsi_pktp->
 		    pkt_ha_private;
 
-		clp = pktp->cmd_command->cpcm_va_cmd;
+		cpcm = pktp->cmd_command;
 	}
 
-	return (cpqary3_send_abortcmd(cpq, tid, clp));
+	r = cpqary3_send_abortcmd(cpq, tgtp, cpcm);
+
+	mutex_exit(&cpq->cpq_mutex);
+	return (r == 0 ? 1 : 0);
 }
 
 /*
@@ -812,15 +833,16 @@ cpqary3_abort(struct scsi_address *sa, struct scsi_pkt *scsi_pktp)
 static int
 cpqary3_getcap(struct scsi_address *sa, char *capstr, int tgtonly)
 {
-	int		index;
-	cpqary3_t	*ctlr = SA2CTLR(sa);
-	cpqary3_tgt_t	*tgtp = ctlr->cpqary3_tgtp[SA2TGT(sa)];
+	int index;
+	cpqary3_t *cpq = SA2CTLR(sa);
+	cpqary3_tgt_t *tgtp = cpqary3_target_from_addr(cpq, sa);
 
 	/*
 	 * If requested Capability is not supported, return -1.
 	 */
-	if (DDI_FAILURE == (index = scsi_hba_lookup_capstr(capstr)))
+	if ((index = scsi_hba_lookup_capstr(capstr)) == DDI_FAILURE) {
 		return (CAP_NOT_DEFINED);
+	}
 
 	/*
 	 * Getting capability for a particulat target is supported
@@ -930,99 +952,6 @@ cpqary3_setcap(struct scsi_address *sa, char *capstr, int value, int tgtonly)
 	}
 }
 
-static int
-cpqary3_handle_flag_nointr(cpqary3_command_t *cpcm, struct scsi_pkt *scsi_pktp)
-{
-	cpqary3_t *cpq = cpcm->cpcm_ctlr;
-
-	/*
-	 * Before sumitting this command, ensure all commands pending
-	 * with the controller are completed.
-	 */
-	mutex_enter(&cpq->sw_mutex);
-	mutex_enter(&cpq->hw_mutex);
-	cpq->cpq_intr_off = B_TRUE;
-	cpqary3_intr_set(cpq, B_FALSE);
-	if (cpq->cpq_host_support & 0x4) {
-		cpqary3_lockup_intr_set(cpq, B_FALSE);
-	}
-
-	while (avl_numnodes(&cpq->cpq_inflight) > 0) {
-		(void) cpqary3_retrieve(cpq, 0, NULL);
-		drv_usecwait(1000);
-	}
-
-	if (cpqary3_submit(cpq, cpcm) != 0) {
-		cpq->cpq_intr_off = B_FALSE;
-		cpqary3_intr_set(cpq, B_TRUE);
-		if (cpq->cpq_host_support & 0x4) {
-			cpqary3_lockup_intr_set(cpq, B_TRUE);
-		}
-
-		mutex_exit(&cpq->hw_mutex);
-		mutex_exit(&cpq->sw_mutex);
-
-		cpqary3_command_free(cpcm);
-		return (TRAN_FATAL_ERROR);
-	}
-
-	if (cpqary3_poll(cpq, cpcm->cpcm_tag) != DDI_SUCCESS) {
-		scsi_pktp->pkt_reason = CMD_TIMEOUT;
-		scsi_pktp->pkt_statistics = STAT_TIMEOUT;
-		scsi_pktp->pkt_state = 0;
-
-		cpq->cpq_intr_off = B_FALSE;
-		cpqary3_intr_set(cpq, B_TRUE);
-		if (cpq->cpq_host_support & 0x4) {
-			cpqary3_lockup_intr_set(cpq, B_TRUE);
-		}
-
-		mutex_exit(&cpq->hw_mutex);
-		mutex_exit(&cpq->sw_mutex);
-
-		cpqary3_command_free(cpcm);
-		return (TRAN_ACCEPT);
-	}
-
-	cpq->cpq_intr_off = B_FALSE;
-	cpqary3_intr_set(cpq, B_TRUE);
-	if (cpq->cpq_host_support & 0x4) {
-		cpqary3_lockup_intr_set(cpq, B_TRUE);
-	}
-
-	mutex_exit(&cpq->hw_mutex);
-	mutex_exit(&cpq->sw_mutex);
-
-	return (TRAN_ACCEPT);
-}
-
-static int
-cpqary3_poll(cpqary3_t *cpq, uint32_t tag)
-{
-	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
-	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
-
-	/*
-	 * Poll the controller for command completions, stopping if we receive
-	 * a completion for the watched tag.  Note that, although we are
-	 * looking for a specific completion, any other commands that complete
-	 * in the interim will have their callbacks fired.
-	 */
-	for (unsigned tries = 0; tries < 120000; tries++) {
-		boolean_t found = B_FALSE;
-
-		(void) cpqary3_retrieve(cpq, tag, &found);
-
-		if (found) {
-			return (DDI_SUCCESS);
-		}
-
-		drv_usecwait(500);
-	}
-
-	return (DDI_FAILURE);
-}
-
 void
 cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 {
@@ -1032,60 +961,48 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 	struct scsi_pkt	*scsi_pktp = cpcm->cpcm_private->scsi_cmd_pkt;
 	boolean_t nointr = (scsi_pktp->pkt_flags & FLAG_NOINTR) != 0;
 
-	VERIFY(MUTEX_HELD(&cpqary3p->sw_mutex));
+	VERIFY(MUTEX_HELD(&cpqary3p->cpq_mutex));
 	VERIFY(cpcm->cpcm_type == CPQARY3_CMDTYPE_OS);
 
-	if (cmdlistp->Header.Tag.error != 0) {
-		mutex_exit(&cpqary3p->sw_mutex);
+	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_TIMEOUT) {
+		scsi_pktp->pkt_reason = CMD_TIMEOUT;
+		scsi_pktp->pkt_statistics |= STAT_TIMEOUT;
+		goto finish;
+	}
 
-		cpqary3_command_free(cpcm);
-
-		scsi_pktp->pkt_reason = CMD_CMPLT;
-		scsi_pktp->pkt_statistics = 0;
-		scsi_pktp->pkt_state = STATE_GOT_BUS |
-		    STATE_GOT_TARGET | STATE_SENT_CMD |
-		    STATE_XFERRED_DATA | STATE_GOT_STATUS;
-
-		if ((scsi_pktp->pkt_flags & FLAG_NOINTR) == 0) {
-			(*scsi_pktp->pkt_comp)(scsi_pktp);
-		}
-
-		mutex_enter(&cpqary3p->sw_mutex);
-		return;
+	if (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR)) {
+		scsi_pktp->pkt_state |= STATE_XFERRED_DATA | STATE_GOT_STATUS;
+		goto finish;
 	}
 
 	switch (errorinfop->CommandStatus) {
-	case CISS_CMD_DATA_OVERRUN :
+	case CISS_CMD_DATA_OVERRUN:
 		scsi_pktp->pkt_reason = CMD_DATA_OVR;
-		scsi_pktp->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_XFERRED_DATA | STATE_GOT_STATUS;
+		scsi_pktp->pkt_state |= STATE_XFERRED_DATA | STATE_GOT_STATUS;
 		break;
 
-	case CISS_CMD_INVALID :
+	case CISS_CMD_INVALID:
 		DTRACE_PROBE1(invalid_cmd, struct scsi_pkt *, scsi_pktp);
 		scsi_pktp->pkt_reason = CMD_BADMSG;
-		scsi_pktp->pkt_state = STATE_GOT_BUS |STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_GOT_STATUS;
+		scsi_pktp->pkt_state |= STATE_GOT_STATUS;
 		break;
 
 	case CISS_CMD_PROTOCOL_ERR :
 		scsi_pktp->pkt_reason = CMD_BADMSG;
-		scsi_pktp->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_GOT_STATUS;
+		scsi_pktp->pkt_state |= STATE_GOT_STATUS;
 		break;
 
 	case CISS_CMD_HARDWARE_ERR:
 	case CISS_CMD_CONNECTION_LOST:
 		scsi_pktp->pkt_reason = CMD_INCOMPLETE;
-		scsi_pktp->pkt_state = 0;
+		scsi_pktp->pkt_state = 0; /* XXX ? */
 		break;
 
 	case CISS_CMD_ABORTED:
 	case CISS_CMD_UNSOLICITED_ABORT:
 		scsi_pktp->pkt_reason = CMD_ABORTED;
-		scsi_pktp->pkt_statistics = STAT_ABORTED;
-		scsi_pktp->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_XFERRED_DATA | STATE_GOT_STATUS;
+		scsi_pktp->pkt_statistics |= STAT_ABORTED;
+		scsi_pktp->pkt_state = STATE_XFERRED_DATA | STATE_GOT_STATUS;
 		break;
 
 	case CISS_CMD_ABORT_FAILED:
@@ -1093,8 +1010,7 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 
 	case CISS_CMD_TIMEOUT:
 		scsi_pktp->pkt_reason = CMD_TIMEOUT;
-		scsi_pktp->pkt_statistics = STAT_TIMEOUT;
-		scsi_pktp->pkt_state = 0;
+		scsi_pktp->pkt_statistics |= STAT_TIMEOUT;
 		break;
 
 	case CISS_CMD_DATA_UNDERRUN:	/* Significant ONLY for Read & Write */
@@ -1157,15 +1073,13 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 		}
 	}
 
-	mutex_exit(&cpqary3p->sw_mutex);
-
+finish:
+	mutex_exit(&cpqary3p->cpq_mutex);
 	cpqary3_command_free(cpcm);
-
-	if (!nointr) {
+	if (!nointr && scsi_pktp->pkt_comp != NULL) {
 		(*scsi_pktp->pkt_comp)(scsi_pktp);
 	}
-
-	mutex_enter(&cpqary3p->sw_mutex);
+	mutex_enter(&cpqary3p->cpq_mutex);
 }
 
 static boolean_t

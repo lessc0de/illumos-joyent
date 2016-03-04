@@ -26,6 +26,8 @@ cpqary3_lockup_check(cpqary3_t *cpq)
 	uint32_t heartbeat = ddi_get32(cpq->cpq_ct_handle,
 	    &cpq->cpq_ct->HeartBeat);
 
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
+
 	/*
 	 * Check to see if the value is the same as last time we looked:
 	 */
@@ -62,91 +64,36 @@ cpqary3_lockup_check(cpqary3_t *cpq)
 	}
 }
 
-/*
- * Function	: 	cpqary3_periodic
- * Description	: 	This routine is called once in 15 seconds to detect any
- *			command that is pending with the controller and has
- *			timed out.
- * Called By	: 	kernel
- * Parameters	: 	per_controller
- * Calls	: 	None
- * Return Values: 	None
- */
-void
-cpqary3_periodic(void *arg)
-{
-	cpqary3_t *cpq = arg;
-	uint32_t no_cmds;
-
-	cpqary3_lockup_check(cpq);
-
-	mutex_enter(&cpq->hw_mutex);
-	mutex_exit(&cpq->hw_mutex);
-
-	/*
-	 * XXX This should be re-tooled to use "cpq_inflight".
-	 */
-#if 0
-	mutex_enter(&cpq->sw_mutex);
-	no_cmds = (uint32_t)((cpq->ctlr_maxcmds / 3) * NO_OF_CMDLIST_IN_A_BLK);
-	for (uint32_t i = 0; i < no_cmds; i++) {
-		cpqary3_cmdpvt_t *local = &cpq->cmdmemlistp->pool[i];
-		cpqary3_pkt_t *pktp;
-		struct scsi_pkt *scsi_pktp;
-		clock_t cpqary3_lbolt;
-
-		ASSERT(local != NULL);
-		if ((pktp = MEM2PVTPKT(local)) == NULL) {
-			continue;
-		}
-
-		if ((local->cmdpvt_flag == CPQARY3_TIMEOUT) ||
-		    (local->cmdpvt_flag == CPQARY3_RESET)) {
-			continue;
-		}
-
-		if (local->occupied != CPQARY3_OCCUPIED) {
-			continue;
-		}
-
-		scsi_pktp = pktp->scsi_cmd_pkt;
-		cpqary3_lbolt = ddi_get_lbolt();
-		if ((scsi_pktp) && (scsi_pktp->pkt_time)) {
-			clock_t cpqary3_ticks = cpqary3_lbolt -
-			    pktp->cmd_start_time;
-
-			if ((drv_hztousec(cpqary3_ticks) / 1000000) >
-			    scsi_pktp->pkt_time) {
-				scsi_pktp->pkt_reason = CMD_TIMEOUT;
-				scsi_pktp->pkt_statistics = STAT_TIMEOUT;
-				scsi_pktp->pkt_state = STATE_GOT_BUS |
-				    STATE_GOT_TARGET | STATE_SENT_CMD;
-				local->cmdpvt_flag = CPQARY3_TIMEOUT;
-
-				/* This should always be the case */
-				if (scsi_pktp->pkt_comp != NULL) {
-					mutex_exit(&cpq->sw_mutex);
-					(*scsi_pktp->pkt_comp)(scsi_pktp);
-					mutex_enter(&cpq->sw_mutex);
-					continue;
-				}
-			}
-		}
-	}
-	mutex_exit(&cpq->sw_mutex);
-#endif
-}
-
 cpqary3_command_t *
 cpqary3_lookup_inflight(cpqary3_t *cpq, uint32_t tag)
 {
-	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
 
 	cpqary3_command_t srch;
 
 	srch.cpcm_tag = tag;
 
 	return (avl_find(&cpq->cpq_inflight, &srch, NULL));
+}
+
+cpqary3_tgt_t *
+cpqary3_target_from_id(cpqary3_t *cpq, unsigned id)
+{
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
+
+	if (id >= CPQARY3_MAX_TGT) {
+		return (NULL);
+	}
+
+	return (cpq->cpq_targets[id]);
+}
+
+cpqary3_tgt_t *
+cpqary3_target_from_addr(cpqary3_t *cpq, struct scsi_address *sa)
+{
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
+
+	return (cpqary3_target_from_id(cpq, sa->a_target));
 }
 
 /*
@@ -161,7 +108,7 @@ int
 cpqary3_target_geometry(struct scsi_address *sa)
 {
 	cpqary3_t	*ctlr = SA2CTLR(sa);
-	cpqary3_tgt_t	*tgtp = ctlr->cpqary3_tgtp[SA2TGT(sa)];
+	cpqary3_tgt_t	*tgtp = ctlr->cpq_targets[SA2TGT(sa)];
 
 	/*
 	 * The target CHS are stored in the per-target structure
@@ -252,19 +199,13 @@ cpqary3_synccmd_free(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	 * cpqary3_process_pkt() clean it up instead.
 	 */
 
-	mutex_enter(&cpq->sw_mutex);
-	if (cpcm->cpcm_synccmd_status == CPQARY3_SYNCCMD_STATUS_SUBMITTED) {
-		/*
-		 * command is still pending (case #3 above).
-		 * mark the command as abandoned and let
-		 * cpqary3_process_pkt() clean it up.
-		 */
-		cpcm->cpcm_synccmd_status = CPQARY3_SYNCCMD_STATUS_TIMEOUT;
-		mutex_exit(&cpq->sw_mutex);
+	mutex_enter(&cpq->cpq_mutex);
+	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT) {
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ABANDONED;
+		mutex_exit(&cpq->cpq_mutex);
 		return;
 	}
-	cpcm->cpcm_synccmd_status = CPQARY3_SYNCCMD_STATUS_NONE;
-	mutex_exit(&cpq->sw_mutex);
+	mutex_exit(&cpq->cpq_mutex);
 
 	/*
 	 * command was either never submitted or has completed
@@ -307,23 +248,17 @@ cpqary3_synccmd_send(cpqary3_t *cpqary3p, cpqary3_command_t *cpcm,
 	}
 
 	/*  acquire the sw mutex for our wait  */
-	mutex_enter(&cpqary3p->sw_mutex);
-	mutex_enter(&cpqary3p->hw_mutex);
-
-	VERIFY(cpcm->cpcm_synccmd_status == CPQARY3_SYNCCMD_STATUS_NONE);
-	cpcm->cpcm_synccmd_status = CPQARY3_SYNCCMD_STATUS_SUBMITTED;
+	mutex_enter(&cpqary3p->cpq_mutex);
 
 	if (cpqary3_submit(cpqary3p, cpcm) != 0) {
-		mutex_exit(&cpqary3p->hw_mutex);
-		mutex_exit(&cpqary3p->sw_mutex);
+		mutex_exit(&cpqary3p->cpq_mutex);
 		return (-1);
 	}
-	mutex_exit(&cpqary3p->hw_mutex);
 
 	/*  wait for command completion, timeout, or signal  */
-	while (cpcm->cpcm_synccmd_status == CPQARY3_SYNCCMD_STATUS_SUBMITTED) {
-		kmutex_t *mt = &cpqary3p->sw_mutex;
-		kcondvar_t *cv = &cpqary3p->cv_ioctl_wait;
+	while (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_COMPLETE)) {
+		kmutex_t *mt = &cpqary3p->cpq_mutex;
+		kcondvar_t *cv = &cpqary3p->cpq_cv_finishq;
 
 		/*  wait with the request behavior  */
 		if (absto) {
@@ -361,7 +296,7 @@ cpqary3_synccmd_send(cpqary3_t *cpqary3p, cpqary3_command_t *cpcm,
 		}
 	}
 
-	mutex_exit(&cpqary3p->sw_mutex);
+	mutex_exit(&cpqary3p->cpq_mutex);
 	return (rc);
 }
 
@@ -434,13 +369,13 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 	 */
 
 	for (i = 0; ld_count < ctlr->cpq_ntargets; i++) {
-		if (i == CTLR_SCSI_ID || ctlr->cpqary3_tgtp[i] == NULL) {
+		if (i == CTLR_SCSI_ID || ctlr->cpq_targets[i] == NULL) {
 			/*  Go to the Next logical target  */
 			continue;
 		}
 
 		bzero(idlogdrive, sizeof (IdLogDrive));
-		cmdlistp->Request.CDB[1] = ctlr->cpqary3_tgtp[i]->logical_id;
+		cmdlistp->Request.CDB[1] = ctlr->cpq_targets[i]->logical_id;
 		/* Always zero */
 		cmdlistp->Header.LUN.PhysDev.TargetId = 0;
 		/*
@@ -452,7 +387,7 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 		 * connected to MSA20 / MSA500
 		 */
 		cmdlistp->Header.LUN.PhysDev.Bus =
-		    (ctlr->cpqary3_tgtp[i]->logical_id) >> 16;
+		    (ctlr->cpq_targets[i]->logical_id) >> 16;
 		cmdlistp->Header.LUN.PhysDev.Mode =
 		    (cmdlistp->Header.LUN.PhysDev.Bus > 0) ?
 		    MASK_PERIPHERIAL_DEV_ADDR :	PERIPHERIAL_DEV_ADDR;
@@ -475,7 +410,7 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 			return (CPQARY3_FAILURE);
 		}
 
-		if (cmdlistp->Header.Tag.error != 0 &&
+		if ((cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR) &&
 		    cpcm->cpcm_va_err->CommandStatus != 2) {
 			DTRACE_PROBE1(id_logdrv_fail,
 			    ErrorInfo_t *, cpcm->cpcm_va_err);
@@ -483,9 +418,9 @@ cpqary3_detect_target_geometry(cpqary3_t *ctlr)
 			return (CPQARY3_FAILURE);
 		}
 
-		ctlr->cpqary3_tgtp[i]->properties.drive.heads =
+		ctlr->cpq_targets[i]->properties.drive.heads =
 		    idlogdrive->heads;
-		ctlr->cpqary3_tgtp[i]->properties.drive.sectors =
+		ctlr->cpq_targets[i]->properties.drive.sectors =
 		    idlogdrive->sectors;
 
 		DTRACE_PROBE2(tgt_geometry_detect,

@@ -246,16 +246,16 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	cpq->cpq_next_tag = CPQARY3_MIN_TAG_NUMBER;
 	list_create(&cpq->cpq_commands, sizeof (cpqary3_command_t),
 	    offsetof(cpqary3_command_t, cpcm_link));
+	list_create(&cpq->cpq_finishq, sizeof (cpqary3_command_t),
+	    offsetof(cpqary3_command_t, cpcm_link_finish));
 	avl_create(&cpq->cpq_inflight, cpqary3_command_comparator,
 	    sizeof (cpqary3_command_t), offsetof(cpqary3_command_t,
 	    cpcm_node));
-	cv_init(&cpq->cv_immediate_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&cpq->cv_flushcache_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&cpq->cv_abort_wait, NULL, CV_DRIVER, NULL);
-	cv_init(&cpq->cv_ioctl_wait, NULL, CV_DRIVER, NULL);
-	cpq->cpqary3_tgtp[CTLR_SCSI_ID] = kmem_zalloc(sizeof (cpqary3_tgt_t),
+	mutex_init(&cpq->cpq_mutex, NULL, MUTEX_DRIVER, NULL);
+	cv_init(&cpq->cpq_cv_finishq, NULL, CV_DRIVER, NULL);
+	cpq->cpq_targets[CTLR_SCSI_ID] = kmem_zalloc(sizeof (cpqary3_tgt_t),
 	    KM_SLEEP);
-	cpq->cpqary3_tgtp[CTLR_SCSI_ID]->type = CPQARY3_TARGET_CTLR;
+	cpq->cpq_targets[CTLR_SCSI_ID]->type = CPQARY3_TARGET_CTLR;
 
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_BASIC;
 
@@ -265,8 +265,7 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	 */
 	if (cpqary3_device_setup(cpq) != DDI_SUCCESS) {
 		dev_err(dip, CE_WARN, "device setup failed");
-		cpqary3_cleanup(cpq);
-		return (DDI_FAILURE);
+		goto fail;
 	}
 
 	/*
@@ -276,8 +275,7 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	 */
 	if (cpqary3_ctlr_init(cpq) != DDI_SUCCESS) {
 		dev_err(dip, CE_WARN, "controller initialisation failed");
-		cpqary3_cleanup(cpq);
-		return (DDI_FAILURE);
+		goto fail;
 	}
 
 	/*
@@ -286,8 +284,7 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	 */
 	if (cpqary3_interrupts_setup(cpq) != DDI_SUCCESS) {
 		dev_err(dip, CE_WARN, "interrupt handler setup failed");
-		cpqary3_cleanup(cpq);
-		return (DDI_FAILURE);
+		goto fail;
 	}
 
 	/*
@@ -296,8 +293,7 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	if ((cpq->cpq_hba_tran = scsi_hba_tran_alloc(dip,
 	    SCSI_HBA_CANSLEEP)) == NULL) {
 		dev_err(dip, CE_WARN, "scsi_hba_tran_alloc failed");
-		cpqary3_cleanup(cpq);
-		return (DDI_FAILURE);
+		goto fail;
 	}
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_HBA_ALLOC;
 
@@ -318,28 +314,9 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	if (scsi_hba_attach_setup(dip, &tmp_dma_attr, cpq->cpq_hba_tran,
 	    SCSI_HBA_TRAN_CLONE) == DDI_FAILURE) {
 		dev_err(dip, CE_WARN, "scsi_hba_attach_setup failed");
-		cpqary3_cleanup(cpq);
-		return (DDI_FAILURE);
+		goto fail;
 	}
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_HBA_ATTACH;
-
-	/*
-	 * Create a minor node for Ioctl interface.
-	 * The nomenclature used will be "cpqary3" immediately followed by
-	 * the current driver instance in the system.
-	 * for e.g.: 	for 0th instance : cpqary3,0
-	 * 				for 1st instance : cpqary3,1
-	 */
-	(void) sprintf(minor_node_name, "cpqary3,%d", instance);
-
-	if (ddi_create_minor_node(dip, minor_node_name, S_IFCHR,
-	    CPQARY3_INST2CPQARY3(instance), DDI_NT_SCSI_NEXUS, 0) !=
-	    DDI_SUCCESS) {
-		cmn_err(CE_NOTE, "CPQary3 : Failed to create minor node");
-		cpqary3_cleanup(cpq);
-		return (DDI_FAILURE);
-	}
-	cpq->cpq_init_level |= CPQARY3_INITLEVEL_MINOR_NODE;
 
 	/* Enable the Controller Interrupt */
 	cpqary3_intr_set(cpq, B_TRUE);
@@ -357,9 +334,17 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	/* Report that an Instance of the Driver is Attached Successfully */
 	ddi_report_dev(dip);
 
-	return (DDI_SUCCESS);
-}
+	if (cpqary3_discover_logical_volumes(cpq, 30) != 0) {
+		dev_err(dip, CE_WARN, "could not discover logical volumes");
+		goto fail;
+	}
 
+	return (DDI_SUCCESS);
+
+fail:
+	cpqary3_cleanup(cpq);
+	return (DDI_FAILURE);
+}
 
 static int
 cpqary3_detach(dev_info_t *dip, ddi_detach_cmd_t detach_cmd)
@@ -425,22 +410,11 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 static void
 cpqary3_cleanup(cpqary3_t *cpq)
 {
-	int8_t		node_name[10];
-	clock_t		cpqary3_lbolt;
-	uint32_t	targ;
-
 	cpqary3_interrupts_teardown(cpq);
 
 	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_PERIODIC) {
 		ddi_periodic_delete(cpq->cpq_periodic);
 		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_PERIODIC;
-	}
-
-	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_MINOR_NODE) {
-		(void) sprintf(node_name, "cpqary3%d",
-		ddi_get_instance(cpq->dip));
-		ddi_remove_minor_node(cpq->dip, node_name);
-		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_MINOR_NODE;
 	}
 
 	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_HBA_ATTACH) {
@@ -454,22 +428,19 @@ cpqary3_cleanup(cpqary3_t *cpq)
 	}
 
 	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_BASIC) {
-		mutex_enter(&cpq->hw_mutex);
+		mutex_destroy(&cpq->cpq_mutex);
 
-		cv_destroy(&cpq->cv_abort_wait);
-		cv_destroy(&cpq->cv_flushcache_wait);
-		cv_destroy(&cpq->cv_immediate_wait);
-		cv_destroy(&cpq->cv_ioctl_wait);
+		cv_destroy(&cpq->cpq_cv_finishq);
 
-		for (targ = 0; targ < CPQARY3_MAX_TGT;  targ++) {
-			if (cpq->cpqary3_tgtp[targ] == NULL)
+		for (int targ = 0; targ < CPQARY3_MAX_TGT;  targ++) {
+			if (cpq->cpq_targets[targ] == NULL) {
 				continue;
-			kmem_free(cpq->cpqary3_tgtp[targ],
-			    sizeof (cpqary3_tgt_t));
-			cpq->cpqary3_tgtp[targ] = NULL;
-		}
+			}
 
-		mutex_exit(&cpq->hw_mutex);
+			kmem_free(cpq->cpq_targets[targ],
+			    sizeof (cpqary3_tgt_t));
+			cpq->cpq_targets[targ] = NULL;
+		}
 
 		/*
 		 * XXX avl_destroy, list_destroy, etc
@@ -484,6 +455,10 @@ cpqary3_cleanup(cpqary3_t *cpq)
 	ddi_soft_state_free(cpqary3_state, ddi_get_instance(cpq->dip));
 }
 
+/*
+ * Comparator for the "cpq_inflight" AVL tree in a "cpqary3_t".  This AVL tree
+ * allows a tag ID to be mapped back to the relevant "cpqary_command_t".
+ */
 static int
 cpqary3_command_comparator(const void *lp, const void *rp)
 {

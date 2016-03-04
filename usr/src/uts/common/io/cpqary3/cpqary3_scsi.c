@@ -62,21 +62,14 @@ cpqary3_probe4targets(cpqary3_t *cpqary3p)
  * Return Values: 	SUCCESS		: 	Build is successful
  *			FAILURE		: 	Build has Failed
  */
-uint8_t
-cpqary3_build_cmdlist(cpqary3_command_t *cpcm, uint32_t tid)
+void
+cpqary3_build_cmdlist(cpqary3_command_t *cpcm, cpqary3_tgt_t *tgtp)
 {
 	int		cntr;
 	cpqary3_t	*cpq = cpcm->cpcm_ctlr;
-	cpqary3_tgt_t	*tgtp;
-	CommandList_t	*cmdlistp;
+	CommandList_t	*cmdlistp = cpcm->cpcm_va_cmd;
 	cpqary3_pkt_t	*pkt = cpcm->cpcm_private;
 	struct buf	*bfp = pkt->bf;
-
-	if ((tgtp = cpq->cpqary3_tgtp[tid]) == NULL) {
-		return (CPQARY3_FAILURE);
-	}
-
-	cmdlistp = cpcm->cpcm_va_cmd;
 
 	/* Update Cmd Header */
 	cmdlistp->Header.SGList = pkt->cmd_cookiecnt;
@@ -94,6 +87,9 @@ cpqary3_build_cmdlist(cpqary3_command_t *cpcm, uint32_t tid)
 		    sizeof (PhysDevAddr_t));
 
 		DTRACE_PROBE1(build_cmdlist_tape, CommandList_t *, cmdlistp);
+	} else {
+		dev_err(cpq->dip, CE_PANIC, "unexpected target type: %x",
+		    tgtp->type);
 	}
 
 	/* Cmd Request */
@@ -142,8 +138,6 @@ cpqary3_build_cmdlist(cpqary3_command_t *cpcm, uint32_t tid)
 		cmdlistp->SG[cntr].Len = (uint32_t)
 		    pkt->cmd_dmacookies[cntr].dmac_size;
 	}
-
-	return (CPQARY3_SUCCESS);
 }
 
 
@@ -159,20 +153,22 @@ cpqary3_build_cmdlist(cpqary3_command_t *cpcm, uint32_t tid)
  *			FAILURE - Could not submit the abort cmd.
  */
 uint8_t
-cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
-    CommandList_t *cmdlist2abortp)
+cpqary3_send_abortcmd(cpqary3_t *cpq, cpqary3_tgt_t *tgtp,
+    cpqary3_command_t *abort_cpcm)
 {
-	CommandList_t		*cmdlistp;
-	cpqary3_tgt_t		*cpqtgtp;
-	cpqary3_tag_t		*cpqary3_tagp;
-	cpqary3_command_t	*cpcm;
+	CommandList_t *cmdlistp;
+	cpqary3_tag_t *cpqary3_tagp;
+	cpqary3_command_t *cpcm;
 
-	if (target_id == CTLR_SCSI_ID) {
-		return (CPQARY3_FAILURE);
-	}
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
 
-	if ((cpqtgtp = cpqary3p->cpqary3_tgtp[target_id]) == NULL) {
-		return (CPQARY3_FAILURE);
+	switch (tgtp->type) {
+	case CPQARY3_TARGET_TAPE:
+	case CPQARY3_TARGET_LOG_VOL:
+		break;
+
+	default:
+		return (EINVAL);
 	}
 
 	/*
@@ -180,10 +176,8 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
 	 * Update the Command List accordingly
 	 * Submit the command and wait for a signal
 	 */
-
-	/* BGB: CVFIX -> Introduced the call to cpqary3_synccmd_alloc */
-	if ((cpcm = cpqary3_synccmd_alloc(cpqary3p, 0)) == NULL) {
-		return (CPQARY3_FAILURE);
+	if ((cpcm = cpqary3_synccmd_alloc(cpq, 0)) == NULL) {
+		return (ENOMEM);
 	}
 
 	cmdlistp = cpcm->cpcm_va_cmd;
@@ -199,43 +193,59 @@ cpqary3_send_abortcmd(cpqary3_t *cpqary3p, uint16_t target_id,
 	cmdlistp->Request.CDBLen = CPQARY3_CDBLEN_16;
 	cmdlistp->Request.CDB[0] = CISS_MSG_ABORT;
 
-	if (cmdlist2abortp != NULL) { /* Abort this Particular Task */
+	if (abort_cpcm != NULL) {
+		/*
+		 * Abort the specified task.
+		 */
 		cmdlistp->Request.CDB[1] = CISS_ABORT_TASK;
+
 		cpqary3_tagp = (cpqary3_tag_t *)&cmdlistp->Request.CDB[4];
-		cpqary3_tagp->tag_value = cmdlist2abortp->Header.Tag.tag_value;
-	} else { /* Abort all tasks for this Target */
+		cpqary3_tagp->tag_value = abort_cpcm->cpcm_tag;
+
+		if (abort_cpcm->cpcm_time_abort != 0) {
+			abort_cpcm->cpcm_time_abort = ddi_get_lbolt();
+		}
+		abort_cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ABORT_SENT;
+
+	} else {
+		/*
+		 * Abort all tasks for the controller.
+		 * XXX Does this cause the controller to fire completion
+		 * of all inflight tasks, but marked aborted?
+		 */
 		cmdlistp->Request.CDB[1] = CISS_ABORT_TASKSET;
 
-		switch (cpqtgtp->type) {
+		switch (tgtp->type) {
 		case CPQARY3_TARGET_LOG_VOL:
 			cmdlistp->Header.LUN.LogDev.Mode = LOGICAL_VOL_ADDR;
-			cmdlistp->Header.LUN.LogDev.VolId = cpqtgtp->logical_id;
+			cmdlistp->Header.LUN.LogDev.VolId = tgtp->logical_id;
 			break;
+
 		case CPQARY3_TARGET_TAPE:
-			bcopy(&(cpqtgtp->PhysID),
-			    &(cmdlistp->Header.LUN.PhysDev),
+			bcopy(&(tgtp->PhysID), &(cmdlistp->Header.LUN.PhysDev),
 			    sizeof (PhysDevAddr_t));
+			break;
+
+		default:
+			panic("unexpected target type");
+			break;
 		}
 	}
 
-	cpcm->cpcm_complete = cpqary3_synccmd_complete;
-
-	/* BGB: CVFIX -> Introduced a call to cpqary3_synccmd_send */
-	if (cpqary3_synccmd_send(cpqary3p, cpcm, 30000,
+	if (cpqary3_synccmd_send(cpq, cpcm, 30000,
 	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
-		cpqary3_synccmd_free(cpqary3p, cpcm);
+		cpqary3_synccmd_free(cpq, cpcm);
 		return (CPQARY3_FAILURE);
 	}
 
-	if (cmdlistp->Header.Tag.error != 0) {
-		cpqary3_synccmd_free(cpqary3p, cpcm);
+	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR) {
+		cpqary3_synccmd_free(cpq, cpcm);
 		return (CPQARY3_FAILURE);
 	}
 
-	cpqary3_synccmd_free(cpqary3p, cpcm);
+	cpqary3_synccmd_free(cpq, cpcm);
 
 	return (CPQARY3_SUCCESS);
-
 }
 
 int
@@ -323,7 +333,7 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 	cmdlistp->Request.Type.Type = CISS_TYPE_CMD;
 	cmdlistp->Request.Type.Attribute = CISS_ATTR_ORDERED;
 	cmdlistp->Request.Type.Direction = CISS_XFER_READ;
-	cmdlistp->Request.CDB[0] = CISS_OPCODE_RLL;
+	cmdlistp->Request.CDB[0] = CISS_SCMD_REPORT_LOGICAL_LUNS;
 
 	data_addr_len = sizeof (rll_data_t);
 
@@ -341,7 +351,7 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 		return (CPQARY3_FAILURE);
 	}
 
-	if ((cmdlistp->Header.Tag.error != 0) &&
+	if ((cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR) &&
 	    (cpcm->cpcm_va_err->CommandStatus != CISS_CMD_DATA_UNDERRUN)) {
 		dev_err(cpqary3p->dip, CE_WARN, "probe for logical targets "
 		    "failed");
@@ -394,11 +404,11 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 	 * Fix for QXCR1000446657: Logical drives are re numbered after
 	 * deleting a Logical drive.
 	 * We are using new indexing mechanism to fill the
-	 * cpqary3_tgtp[],
-	 * Check given during memory allocation of cpqary3_tgtp
+	 * cpq_targets[],
+	 * Check given during memory allocation of cpq_targets
 	 * elements, so that memory is not re-allocated each time the
 	 * cpqary3_probe4LVs() is called.
-	 * Check given while freeing the memory of the cpqary3_tgtp[]
+	 * Check given while freeing the memory of the cpq_targets[]
 	 * elements, when a hole is found in the Logical Drives
 	 * configured.
 	 */
@@ -410,14 +420,14 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 		    cntr : cntr + CPQARY3_TGT_ALIGNMENT);
 		lun_id = (rllp->ll_data[ld_count].logical_id & 0xFFFF);
 		if (cntr != lun_id) {
-			if (cpqary3p->cpqary3_tgtp[i]) {
-				kmem_free(cpqary3p->cpqary3_tgtp[i],
+			if (cpqary3p->cpq_targets[i]) {
+				kmem_free(cpqary3p->cpq_targets[i],
 				    sizeof (cpqary3_tgt_t));
-				cpqary3p->cpqary3_tgtp[i] = NULL;
+				cpqary3p->cpq_targets[i] = NULL;
 			}
 		} else {
-			if (cpqary3p->cpqary3_tgtp[i] == NULL &&
-			    !(cpqary3p->cpqary3_tgtp[i] =
+			if (cpqary3p->cpq_targets[i] == NULL &&
+			    !(cpqary3p->cpq_targets[i] =
 			    (cpqary3_tgt_t *)kmem_zalloc(
 			    sizeof (cpqary3_tgt_t), KM_NOSLEEP))) {
 				cmn_err(CE_WARN,
@@ -429,9 +439,9 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 				/* Sync Changes */
 				return (CPQARY3_FAILURE);
 			}
-			cpqary3p->cpqary3_tgtp[i]->logical_id =
+			cpqary3p->cpq_targets[i]->logical_id =
 			    rllp->ll_data[ld_count].logical_id;
-			cpqary3p->cpqary3_tgtp[i]->type =
+			cpqary3p->cpq_targets[i]->type =
 			    CPQARY3_TARGET_LOG_VOL;
 
 			/*
@@ -449,8 +459,8 @@ cpqary3_probe4LVs(cpqary3_t *cpqary3p)
 		cpqary3_tgt_t *t;
 		i = ((cntr < CTLR_SCSI_ID) ?
 		    cntr : cntr + CPQARY3_TGT_ALIGNMENT);
-		t = cpqary3p->cpqary3_tgtp[i];
-		cpqary3p->cpqary3_tgtp[i] = NULL;
+		t = cpqary3p->cpq_targets[i];
+		cpqary3p->cpq_targets[i] = NULL;
 		if (t != NULL) {
 			kmem_free(t, sizeof (*t));
 		}
@@ -509,7 +519,7 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 	cmdlistp->Request.Type.Type = CISS_TYPE_CMD;
 	cmdlistp->Request.Type.Attribute = CISS_ATTR_ORDERED;
 	cmdlistp->Request.Type.Direction = CISS_XFER_READ;
-	cmdlistp->Request.CDB[0] = CISS_OPCODE_RPL;
+	cmdlistp->Request.CDB[0] = CISS_SCMD_REPORT_PHYSICAL_LUNS;
 
 	data_addr_len = sizeof (rpl_data_t);
 
@@ -527,7 +537,7 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 		return (CPQARY3_FAILURE);
 	}
 
-	if ((cmdlistp->Header.Tag.error != 0) &&
+	if ((cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR) &&
 	    (cpcm->cpcm_va_err->CommandStatus != CISS_CMD_DATA_UNDERRUN)) {
 		cmn_err(CE_WARN, "CPQary3 : Probe for physical targets "
 		    "returned ERROR !");
@@ -568,8 +578,8 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 
 	for (cntr = 0; cntr < phy_lun_no; cntr++) {
 		if (rplp->pl_data[cntr].Mode == CISS_PHYS_MODE) {
-			if (cpqary3p->cpqary3_tgtp[ii] == NULL &&
-			    !(cpqary3p->cpqary3_tgtp[ii] =
+			if (cpqary3p->cpq_targets[ii] == NULL &&
+			    !(cpqary3p->cpq_targets[ii] =
 			    (cpqary3_tgt_t *)
 			    kmem_zalloc(sizeof (cpqary3_tgt_t), KM_NOSLEEP))) {
 				cmn_err(CE_WARN, "CPQary3 : Failed to Detect "
@@ -579,13 +589,13 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 			}
 
 			bcopy(&(rplp->pl_data[cntr]),
-			    &(cpqary3p->cpqary3_tgtp[ii]->PhysID),
+			    &(cpqary3p->cpq_targets[ii]->PhysID),
 			    sizeof (PhysDevAddr_t));
 
-			cpqary3p->cpqary3_tgtp[ii]->type = CPQARY3_TARGET_TAPE;
+			cpqary3p->cpq_targets[ii]->type = CPQARY3_TARGET_TAPE;
 
 			DTRACE_PROBE1(tape_discovered,
-			    cpqary3_tgt_t *, cpqary3p->cpqary3_tgtp[ii]);
+			    cpqary3_tgt_t *, cpqary3p->cpq_targets[ii]);
 
 			ii++;
 		}
@@ -595,45 +605,4 @@ cpqary3_probe4Tapes(cpqary3_t *cpqary3p)
 
 	return (CPQARY3_SUCCESS);
 
-}
-
-/*
- * Function	:    cpqary3_synccmd_complete
- * Description	:    This routine processes the completed commands
- *			using the sync interface and
- *			initiates any callback that is needed.
- * Called By	:    cpqary3_transport
- * Parameters	:    per-command
- * Calls	:    cpqary3_cmdlist_release, cpqary3_synccmd_cleanup
- * Return Values:    None
- */
-void
-cpqary3_synccmd_complete(cpqary3_command_t *cpcm)
-{
-	cpqary3_t *cpq = cpcm->cpcm_ctlr;
-
-	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
-
-	switch (cpcm->cpcm_synccmd_status) {
-	case CPQARY3_SYNCCMD_STATUS_TIMEOUT:
-		/*
-		 * The submitter has abandoned this command, so we
-		 * have to free the resources here.
-		 */
-		mutex_exit(&cpq->sw_mutex);
-		cpqary3_command_free(cpcm);
-		mutex_enter(&cpq->sw_mutex);
-		return;
-
-	case CPQARY3_SYNCCMD_STATUS_SUBMITTED:
-		cpcm->cpcm_synccmd_status = CPQARY3_SYNCCMD_STATUS_NONE;
-		cv_broadcast(&cpq->cv_ioctl_wait);
-		return;
-
-	case CPQARY3_SYNCCMD_STATUS_NONE:
-		panic("synccmd completed but status is NONE");
-		break;
-	}
-
-	panic("unknown synccmd status");
 }

@@ -23,6 +23,20 @@ cpqary3_round_up(size_t offset)
 	return ((offset + (gran - 1)) & ~(gran - 1));
 }
 
+static void
+cpqary3_set_new_tag(cpqary3_t *cpq, cpqary3_command_t *cpcm)
+{
+	/*
+	 * Grab a new tag number for this command.  We aim to avoid reusing tag
+	 * numbers as much as possible, so as to avoid spurious double
+	 * completion from the controller.
+	 */
+	cpcm->cpcm_tag = cpq->cpq_next_tag;
+	if (++cpq->cpq_next_tag > CPQARY3_MAX_TAG_NUMBER) {
+		cpq->cpq_next_tag = CPQARY3_MIN_TAG_NUMBER;
+	}
+}
+
 cpqary3_command_t *
 cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type)
 {
@@ -36,29 +50,16 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type)
 
 	switch (type) {
 	case CPQARY3_CMDTYPE_OS:
-		cpcm->cpcm_complete = cpqary3_oscmd_complete;
-		break;
-
 	case CPQARY3_CMDTYPE_SYNCCMD:
-		cpcm->cpcm_complete = cpqary3_synccmd_complete;
 		break;
-
 	default:
 		panic("unexpected type");
 	}
 	cpcm->cpcm_type = type;
 
-	/*
-	 * Grab a new tag number for this command.  We aim to avoid reusing tag
-	 * numbers as much as possible, so as to avoid spurious double
-	 * completion from the controller.
-	 */
-	mutex_enter(&cpq->sw_mutex);
-	cpcm->cpcm_tag = cpq->cpq_next_tag;
-	if (++cpq->cpq_next_tag > 0xfffff) {
-		cpq->cpq_next_tag = 0x54321;
-	}
-	mutex_exit(&cpq->sw_mutex);
+	mutex_enter(&cpq->cpq_mutex);
+	cpqary3_set_new_tag(cpq, cpcm);
+	mutex_exit(&cpq->cpq_mutex);
 
 	size_t contig_size = 0;
 	size_t errorinfo_offset;
@@ -108,9 +109,9 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type)
 	/*
 	 * Insert into the per-controller command list.
 	 */
-	mutex_enter(&cpq->sw_mutex);
+	mutex_enter(&cpq->cpq_mutex);
 	list_insert_tail(&cpq->cpq_commands, cpcm);
-	mutex_exit(&cpq->sw_mutex);
+	mutex_exit(&cpq->cpq_mutex);
 
 	return (cpcm);
 }
@@ -140,38 +141,30 @@ cpqary3_command_reuse(cpqary3_command_t *cpcm)
 {
 	cpqary3_t *cpq = cpcm->cpcm_ctlr;
 
-	mutex_enter(&cpq->sw_mutex);
+	mutex_enter(&cpq->cpq_mutex);
 
 	/*
 	 * Make sure the command is not currently inflight.
 	 */
-	VERIFY(!cpcm->cpcm_inflight);
-	if (!cpcm->cpcm_used) {
+	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT));
+	if (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_USED)) {
 		/*
 		 * If the command has not yet been issued to the controller,
 		 * this is a no-op.
 		 */
-		mutex_exit(&cpq->sw_mutex);
+		mutex_exit(&cpq->cpq_mutex);
 		return;
 	}
-	cpcm->cpcm_used = B_FALSE;
+	cpcm->cpcm_status &= ~CPQARY3_CMD_STATUS_USED;
 
-	/*
-	 * Grab a new tag number for this command.  We aim to avoid reusing tag
-	 * numbers as much as possible, so as to avoid spurious double
-	 * completion from the controller.
-	 */
-	cpcm->cpcm_tag = cpq->cpq_next_tag;
-	if (++cpq->cpq_next_tag > 0xfffff) {
-		cpq->cpq_next_tag = 0x54321;
-	}
+	cpqary3_set_new_tag(cpq, cpcm);
 
 	/*
 	 * Populate fields.
 	 */
 	cpcm->cpcm_va_cmd->Header.Tag.tag_value = cpcm->cpcm_tag;
 
-	mutex_exit(&cpq->sw_mutex);
+	mutex_exit(&cpq->cpq_mutex);
 }
 
 void
@@ -183,7 +176,7 @@ cpqary3_command_free(cpqary3_command_t *cpcm)
 	 * Ensure the object we are about to free is not currently in the
 	 * inflight AVL.
 	 */
-	VERIFY(!cpcm->cpcm_inflight);
+	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT));
 
 	if (cpcm->cpcm_internal != NULL) {
 		cpqary3_command_internal_t *cpcmi = cpcm->cpcm_internal;
@@ -195,9 +188,9 @@ cpqary3_command_free(cpqary3_command_t *cpcm)
 
 	cpqary3_free_phyctgs_mem(&cpcm->cpcm_phyctg, CPQARY3_FREE_PHYCTG_MEM);
 
-	mutex_enter(&cpq->sw_mutex);
+	mutex_enter(&cpq->cpq_mutex);
 	list_remove(&cpq->cpq_commands, cpcm);
-	mutex_exit(&cpq->sw_mutex);
+	mutex_exit(&cpq->cpq_mutex);
 
 	kmem_free(cpcm, sizeof (*cpcm));
 }

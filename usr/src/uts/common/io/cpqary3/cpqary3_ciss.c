@@ -15,15 +15,103 @@
 
 #include "cpqary3.h"
 
-int
-cpqary3_retrieve(cpqary3_t *cpq, uint32_t want_tag, boolean_t *found)
+/*
+ * This routine is executed every 15 seconds via ddi_periodic_add(9F).  It
+ * checks the health of the controller and looks for submitted commands that
+ * have timed out.
+ */
+void
+cpqary3_periodic(void *arg)
 {
-	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
-	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
+	cpqary3_t *cpq = arg;
+	clock_t now;
+	cpqary3_command_t *cpcm, *cpcm_next;
+
+	mutex_enter(&cpq->cpq_mutex);
+
+	/*
+	 * Check on the health of the controller firmware.  Note that if the
+	 * controller has locked up, this routine will panic the system.
+	 */
+	cpqary3_lockup_check(cpq);
+
+	/*
+	 * Run the retrieval routine, in case the controller has become
+	 * stuck or we have somehow missed an interrupt.
+	 */
+	(void) cpqary3_retrieve(cpq);
+
+	/*
+	 * Check inflight commands to see if they have timed out.
+	 */
+	now = ddi_get_lbolt();
+	for (cpcm = avl_first(&cpq->cpq_inflight); cpcm != NULL;
+	    cpcm = cpcm_next) {
+		cpqary3_pkt_t *privp;
+		struct scsi_pkt *pkt;
+		clock_t exp;
+
+		/*
+		 * Save the next entry now, in case we need to remove this one
+		 * from the AVL tree.
+		 */
+		cpcm_next = AVL_NEXT(&cpq->cpq_inflight, cpcm);
+
+		/*
+		 * We only need to process command timeout for commands
+		 * issued on behalf of SCSA.
+		 */
+		if (cpcm->cpcm_type != CPQARY3_CMDTYPE_OS ||
+		    (privp = cpcm->cpcm_private) == NULL ||
+		    (pkt = privp->scsi_cmd_pkt) == NULL) {
+			continue;
+		}
+
+		if (pkt->pkt_time == 0) {
+			/*
+			 * This SCSI command has no timeout.
+			 */
+			continue;
+		}
+
+		if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLLED) {
+			/*
+			 * Polled commands are timed out by the polling
+			 * routine.
+			 */
+			continue;
+		}
+
+		exp = CPQARY3_SEC2HZ(pkt->pkt_time) + cpcm->cpcm_time_submit;
+		if (exp < now) {
+			/*
+			 * This command has timed out.  Set the appropriate
+			 * status bit and push it onto the completion
+			 * queue.
+			 */
+			cpcm->cpcm_status |= CPQARY3_CMD_STATUS_TIMEOUT;
+			cpcm->cpcm_status &= ~CPQARY3_CMD_STATUS_INFLIGHT;
+			avl_remove(&cpq->cpq_inflight, cpcm);
+			list_insert_tail(&cpq->cpq_finishq, cpcm);
+		}
+	}
+
+	/*
+	 * Process the completion queue.
+	 */
+	(void) cpqary3_process_finishq(cpq);
+
+	mutex_exit(&cpq->cpq_mutex);
+}
+
+int
+cpqary3_retrieve(cpqary3_t *cpq)
+{
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
 
 	switch (cpq->cpq_ctlr_mode) {
 	case CPQARY3_CTLR_MODE_SIMPLE:
-		cpqary3_retrieve_simple(cpq, want_tag, found);
+		cpqary3_retrieve_simple(cpq);
 		return (DDI_SUCCESS);
 
 	case CPQARY3_CTLR_MODE_UNKNOWN:
@@ -33,25 +121,28 @@ cpqary3_retrieve(cpqary3_t *cpq, uint32_t want_tag, boolean_t *found)
 	panic("unknown controller mode");
 }
 
+/*
+ * Submit a command to the controller.
+ */
 int
 cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 {
-	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
 
 	/*
-	 * If a controller lockup has been detected, reject new command
-	 * submissions.
+	 * Do not allow submission of more concurrent commands than the
+	 * controller supports.
 	 */
-	if (cpq->controller_lockup) {
-		return (EIO);
+	if (avl_numnodes(&cpq->cpq_inflight) >= cpq->cpq_maxcmds) {
+		return (EAGAIN);
 	}
 
 	/*
 	 * Ensure that this command is not re-used without issuing a new
 	 * tag number and performing any appropriate cleanup.
 	 */
-	VERIFY(!cpcm->cpcm_used);
-	cpcm->cpcm_used = B_TRUE;
+	VERIFY(!(cpcm->cpcm_status & ~CPQARY3_CMD_STATUS_USED));
+	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_USED;
 
 	/*
 	 * Insert this command into the inflight AVL.
@@ -63,13 +154,14 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	}
 	avl_insert(&cpq->cpq_inflight, cpcm, where);
 
-	VERIFY(cpcm->cpcm_inflight == B_FALSE);
-	cpcm->cpcm_inflight = B_TRUE;
+	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT));
+	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_INFLIGHT;
+
 	cpcm->cpcm_time_submit = ddi_get_lbolt();
 
 	switch (cpq->cpq_ctlr_mode) {
 	case CPQARY3_CTLR_MODE_SIMPLE:
-		cpqary3_put32(cpq, CISS_I2O_INBOUND_POST_Q, cpcm->cpcm_pa_cmd);
+		cpqary3_submit_simple(cpq, cpcm);
 		break;
 
 	default:
@@ -77,6 +169,96 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	}
 
 	return (0);
+}
+
+static void
+cpqary3_process_finishq_one(cpqary3_command_t *cpcm)
+{
+	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_COMPLETE;
+
+	switch (cpcm->cpcm_type) {
+	case CPQARY3_CMDTYPE_SYNCCMD:
+		cv_broadcast(&cpcm->cpcm_ctlr->cpq_cv_finishq);
+		return;
+
+	case CPQARY3_CMDTYPE_OS:
+		cpqary3_oscmd_complete(cpcm);
+		return;
+
+	default:
+		break;
+	}
+
+	panic("unknown command type");
+}
+
+void
+cpqary3_process_finishq(cpqary3_t *cpq)
+{
+	cpqary3_command_t *cpcm;
+
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
+
+	while ((cpcm = list_remove_head(&cpq->cpq_finishq)) != NULL) {
+		/*
+		 * Check if this command has been abandoned by the original
+		 * submitter.  If it has, free it now to avoid a leak.
+		 */
+		if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_ABANDONED) {
+			mutex_exit(&cpq->cpq_mutex);
+			cpqary3_command_free(cpcm);
+			mutex_enter(&cpq->cpq_mutex);
+			continue;
+		}
+
+		if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLLED) {
+			/*
+			 * This command will be picked up and processed
+			 * by "cpqary3_poll_for()" once the CV is triggered
+			 * at the end of processing.
+			 */
+			cpcm->cpcm_status |= CPQARY3_CMD_STATUS_POLL_COMPLETE;
+			continue;
+		}
+
+		cpqary3_process_finishq_one(cpcm);
+	}
+
+	cv_broadcast(&cpq->cpq_cv_finishq);
+}
+
+void
+cpqary3_poll_for(cpqary3_t *cpq, cpqary3_command_t *cpcm)
+{
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
+	VERIFY(cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLLED);
+
+	while (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLL_COMPLETE)) {
+		cv_wait(&cpq->cpq_cv_finishq, &cpq->cpq_mutex);
+	}
+
+#if 0
+	/*
+	 * Ensure this command is no longer in the inflight AVL.
+	 */
+	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT) {
+		cpcm->cpcp_status &= ~CPQARY3_CMD_STATUS_INFLIGHT;
+		avl_remove(&cpq->cpq_inflight, cpcm);
+
+		/*
+		 * Mark it timed out.
+		 */
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_TIMEOUT |
+		    CPQARY3_CMD_STATUS_COMPLETE;
+	}
+#endif
+
+	/*
+	 * Fire the completion callback for this command.  The callback
+	 * is responsible for freeing the command, so it may not be
+	 * referenced again once this call returns.
+	 */
+	cpqary3_process_finishq_one(cpcm);
 }
 
 void
@@ -127,23 +309,6 @@ cpqary3_lockup_intr_set(cpqary3_t *cpq, boolean_t enabled)
 	}
 
 	cpqary3_put32(cpq, CISS_I2O_INTERRUPT_MASK, imr);
-}
-
-void
-cpqary3_trigger_sw_isr(cpqary3_t *cpq)
-{
-	boolean_t trigger = B_FALSE;
-
-	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
-
-	if (!cpq->cpq_swintr_flag) {
-		trigger = B_TRUE;
-		cpq->cpq_swintr_flag = B_TRUE;
-	}
-
-	if (trigger) {
-		ddi_trigger_softintr(cpq->cpqary3_softintr_id);
-	}
 }
 
 /*

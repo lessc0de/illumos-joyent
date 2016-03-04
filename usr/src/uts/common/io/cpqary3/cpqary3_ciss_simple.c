@@ -15,31 +15,17 @@
 
 #include "cpqary3.h"
 
-boolean_t
-cpqary3_check_simple_ctlr_intr(cpqary3_t *cpq)
+uint_t
+cpqary3_isr_hw_simple(caddr_t arg1, caddr_t arg2)
 {
-	uint32_t intr_pending_mask = cpq->cpq_board->bd_intrpendmask;
+	cpqary3_t *cpq = (cpqary3_t *)arg1;
 	uint32_t isr = cpqary3_get32(cpq, CISS_I2O_INTERRUPT_STATUS);
+
+	mutex_enter(&cpq->cpq_mutex);
 
 	/*
-	 * Read the Interrupt Status Register and
-	 * if bit 3 is set, it indicates that we have completed commands
-	 * in the controller
+	 * Check to see if this interrupt came from the device:
 	 */
-	if ((isr & intr_pending_mask) != 0) {
-		return (CPQARY3_SUCCESS);
-	}
-
-	return (CPQARY3_FAILURE);
-}
-
-uint_t
-cpqary3_isr_hw_simple(caddr_t arg)
-{
-	cpqary3_t *cpq = (cpqary3_t *)arg;
-	uint32_t isr = cpqary3_get32(cpq, CISS_I2O_INTERRUPT_STATUS);
-
-	mutex_enter(&cpq->hw_mutex);
 	if ((isr & cpq->cpq_board->bd_intrpendmask) == 0) {
 		/*
 		 * Check to see if the firmware has come to rest.  If it has,
@@ -47,71 +33,40 @@ cpqary3_isr_hw_simple(caddr_t arg)
 		 */
 		cpqary3_lockup_check(cpq);
 
-		mutex_exit(&cpq->hw_mutex);
+		mutex_exit(&cpq->cpq_mutex);
 		return (DDI_INTR_UNCLAIMED);
 	}
 
 	/*
-	 * Disable interrupts until the soft interrupt handler has had a chance
-	 * to read and process replies.
+	 * The interrupt was from our controller, so collect any pending
+	 * command completions.
 	 */
-	cpqary3_intr_set(cpq, B_FALSE);
-
-	cpqary3_trigger_sw_isr(cpq);
-
-	mutex_exit(&cpq->hw_mutex);
-	return (DDI_INTR_CLAIMED);
-}
-
-uint_t
-cpqary3_isr_sw_simple(caddr_t arg)
-{
-	cpqary3_t *cpq = (cpqary3_t *)arg;
+	cpqary3_retrieve_simple(cpq);
 
 	/*
-	 * Confirm that the hardware interrupt routine scheduled this
-	 * software interrupt.
+	 * Process any commands in the completion queue.
 	 */
-	mutex_enter(&cpq->sw_mutex);
-	mutex_enter(&cpq->hw_mutex);
-	if (!cpq->cpq_swintr_flag) {
-		mutex_exit(&cpq->hw_mutex);
-		mutex_exit(&cpq->sw_mutex);
-		return (DDI_INTR_UNCLAIMED);
-	}
+	cpqary3_process_finishq(cpq);
 
-	cpqary3_retrieve_simple(cpq, 0, NULL);
-
-	/*
-	 * Unmask the controller inbound data interrupt.
-	 */
-	if (!cpq->cpq_intr_off) {
-		cpqary3_intr_set(cpq, B_TRUE);
-	}
-
-	cpq->cpq_swintr_flag = B_FALSE;
-	mutex_exit(&cpq->hw_mutex);
-	mutex_exit(&cpq->sw_mutex);
+	mutex_exit(&cpq->cpq_mutex);
 	return (DDI_INTR_CLAIMED);
 }
-
 
 /*
  * Read tags and process completion of the associated command until the supply
  * of tags is exhausted.
  */
 void
-cpqary3_retrieve_simple(cpqary3_t *cpq, uint32_t watchfor, boolean_t *found)
+cpqary3_retrieve_simple(cpqary3_t *cpq)
 {
 	uint32_t opq;
 	uint32_t none = 0xffffffff;
 
-	VERIFY(MUTEX_HELD(&cpq->hw_mutex));
-	VERIFY(MUTEX_HELD(&cpq->sw_mutex));
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
 
 	while ((opq = cpqary3_get32(cpq, CISS_I2O_OUTBOUND_POST_Q)) != none) {
+		uint32_t tag = CISS_OPQ_READ_TAG(opq);
 		cpqary3_command_t *cpcm;
-		uint32_t tag = opq >> 2; /* XXX */
 
 		if ((cpcm = cpqary3_lookup_inflight(cpq, tag)) == NULL) {
 			dev_err(cpq->dip, CE_WARN, "spurious tag %x", tag);
@@ -119,17 +74,26 @@ cpqary3_retrieve_simple(cpqary3_t *cpq, uint32_t watchfor, boolean_t *found)
 		}
 
 		avl_remove(&cpq->cpq_inflight, cpcm);
-		cpcm->cpcm_inflight = B_FALSE;
-		cpcm->cpcm_error = (opq & (0x1 << 1)) != 0;
-
-		if (found != NULL && cpcm->cpcm_tag == watchfor) {
-			*found = B_TRUE;
+		cpcm->cpcm_status &= ~CPQARY3_CMD_STATUS_INFLIGHT;
+		if (CISS_OPQ_READ_ERROR(opq) != 0) {
+			cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ERROR;
 		}
 
-		mutex_exit(&cpq->hw_mutex);
-		cpcm->cpcm_complete(cpcm);
-		mutex_enter(&cpq->hw_mutex);
+		/*
+		 * Push this command onto the completion queue.
+		 */
+		list_insert_tail(&cpq->cpq_finishq, cpcm);
 	}
+}
+
+/*
+ * Submit a command to the controller by posting it to the Inbound Post Queue
+ * Register.
+ */
+void
+cpqary3_submit_simple(cpqary3_t *cpq, cpqary3_command_t *cpcm)
+{
+	cpqary3_put32(cpq, CISS_I2O_INBOUND_POST_Q, cpcm->cpcm_pa_cmd);
 }
 
 int

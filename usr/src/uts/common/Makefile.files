@@ -2157,8 +2157,10 @@ CPQARY3_OBJS =	cpqary3.o \
 		cpqary3_device.o \
 		cpqary3_interrupts.o \
 		cpqary3_commands.o \
+		cpqary3_logvol.o \
+		cpqary3_hba.o \
 		cpqary3_ciss_simple.o \
-		cpqary3_ciss.o
+		cpqary3_ciss.o \
 
 #
 #	ISCSI_INITIATOR module

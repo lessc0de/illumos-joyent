@@ -148,6 +148,16 @@ extern "C" {
 #define	CISS_CFGTBL_XPORT_MEMQ			(1UL << 4)
 
 /*
+ * In the Simple Transport Method, the Outbound Post Queue register is
+ * repeatedly read for notifications of the completion of commands previously
+ * submitted to the controller.  These macros help break up the read value into
+ * its component fields: the tag number, and whether or not the command
+ * completed in error.
+ */
+#define	CISS_OPQ_READ_TAG(x)			((x) >> 2)
+#define	CISS_OPQ_READ_ERROR(x)			((x) & (1UL << 0))
+
+/*
  * STRUCTURES
  * Command List Structure
  */

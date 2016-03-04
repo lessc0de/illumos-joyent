@@ -38,9 +38,17 @@ extern "C" {
 
 #define	CISS_NEW_READ				0xC0
 #define	CISS_NEW_WRITE				0xC1
-#define	CISS_OPCODE_RLL				0xC2
-#define	CISS_OPCODE_RPL				0xC3
 #define	CISS_NO_TIMEOUT				0x00
+
+/*
+ * Vendor-specific SCSI Commands
+ *
+ * These command opcodes are for use in the first byte of the CDB in a
+ * CISS_TYPE_CMD XXX message.  These are essentially SCSI commands, but using
+ * the vendor-specific part of the opcode space; i.e., 0xC0 through 0xFF.
+ */	
+#define	CISS_SCMD_REPORT_LOGICAL_LUNS		0xC2
+#define	CISS_SCMD_REPORT_PHYSICAL_LUNS		0xC3
 
 /*
  * BMIC Commands
@@ -49,8 +57,8 @@ extern "C" {
  * but _do_ appear in "Compaq Host-Based PCI Array Controller Firmware
  * Specification" (March 1999).
  *
- * These commands are generally sent to the controller LUN via
- * CISS_SCMD_ARRAY_WRITE in a command CDB.
+ * These commands are sent to the controller LUN via CISS_SCMD_ARRAY_WRITE 
+ * and (CISS_SCMD_ARRAY_READ? XXX) in a command CDB.
  */
 #define	BMIC_FLUSH_CACHE			0xC2
 #define	BMIC_IDENTIFY_LOGICAL_DRIVE		0x10
@@ -76,31 +84,47 @@ extern "C" {
  *		7					- (Controller)
  *		8 - 32				7 - 31
  */
-
 #define	CPQARY3_TGT_ALIGNMENT			0x1
-#define	CPQARY3_LEN_TAGINUSE			0x4
 
-#define	CPQARY3_CDBLEN_12				12
-#define	CPQARY3_CDBLEN_16				16
-
-/*
- * possible values to fill in the cmdpvt_flag member
- * in the cpqary3_cmdpvt_t structure
- */
-#define	CPQARY3_TIMEOUT			1
-#define	CPQARY3_CV_TIMEOUT		2
-#define	CPQARY3_RESET			4
-#define	CPQARY3_SYNC_SUBMITTED		8
-#define	CPQARY3_SYNC_TIMEOUT		16
-
-#define	CPQARY3_COALESCE_DELAY		0x0
-#define	CPQARY3_COALESCE_COUNT		0x00000001l
+#define	CPQARY3_CDBLEN_12			12
+#define	CPQARY3_CDBLEN_16			16
 
 /* Fatal SCSI Status */
 #define	SCSI_CHECK_CONDITION			0x2
 #define	SCSI_COMMAND_TERMINATED			0x22
 
 #pragma pack(1)
+
+typedef struct cpqary3_report_logical_lun_ent {
+	LogDevAddr_t cprle_addr;
+} cpqary3_report_logical_lun_ent_t;
+
+typedef struct cpqary3_report_logical_lun_extent {
+	LogDevAddr_t cprle_addr;
+	uint8_t cprle_wwn[16];
+} cpqary3_report_logical_lun_extent_t;
+
+typedef struct cpqary3_report_logical_lun {
+	uint32_t cprll_datasize; /* Big Endian */
+	uint8_t cprll_extflag;
+	uint8_t cprll_reserved1[3];
+	union {
+		cpqary3_report_logical_lun_ent_t ents[MAX_LOGDRV];
+		cpqary3_report_logical_lun_extent_t extents[MAX_LOGDRV];
+	} cprll_data;
+} cpqary3_report_logical_lun_t;
+
+typedef struct cpqary3_report_logical_lun_req {
+	uint8_t cprllr_opcode;
+	uint8_t cprllr_extflag;
+	uint8_t cprllr_reserved1[4];
+	uint32_t cprllr_datasize; /* Big Endian */
+	uint8_t cprllr_reserved2;
+	uint8_t cprllr_control;
+} cpqary3_report_logical_lun_req_t;
+
+
+
 
 typedef struct flushcache {
 	uint16_t	disable_flag;
