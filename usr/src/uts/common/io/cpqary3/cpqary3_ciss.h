@@ -25,7 +25,7 @@ extern "C" {
 #define	CISS_INIT_TIME		90	/* Driver Defined Value */
 					/* Duration to Wait for the */
 					/* controller initialization */
-#define	CISS_SENSEINFOBYTES	256	/* Note that this value may vary */
+#define	CISS_SENSEINFOBYTES	384	/* Note that this value may vary */
 					/* between host implementations */
 #define	CISS_MAXSGENTRIES	64
 #define	CISS_MAXREPLYQS		256

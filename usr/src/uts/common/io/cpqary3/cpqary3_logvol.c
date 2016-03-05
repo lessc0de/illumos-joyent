@@ -191,7 +191,7 @@ cpqary3_discover_logical_volumes(cpqary3_t *cpq, int timeout)
 	 * for the returned list of Logical Volumes.
 	 */
 	if ((cpcm = cpqary3_synccmd_alloc(cpq,
-	    sizeof (cpqary3_report_logical_lun_t))) == NULL) {
+	    sizeof (cpqary3_report_logical_lun_t), KM_NOSLEEP)) == NULL) {
 		return (ENOMEM);
 	}
 	cprll = cpcm->cpcm_internal->cpcmi_va;

@@ -85,8 +85,15 @@ cpqary3_getcap(struct scsi_address *sa, char *capstr, int tgtonly)
 	DTRACE_PROBE1(getcap_index, int, index);
 
 	switch (index) {
+	case SCSI_CAP_CDB_LEN:
+		return (16);
 	case SCSI_CAP_DMA_MAX:
 		return ((int)cpqary3_dma_attr.dma_attr_maxxfer);
+	case SCSI_CAP_DISCONNECT:
+	case SCSI_CAP_SYNCHRONOUS:
+	case SCSI_CAP_WIDE_XFER:
+	case SCSI_CAP_ARQ:
+		return (1);
 #if 0
 	case SCSI_CAP_DISCONNECT:
 		return (tgtp->ctlr_flags & CPQARY3_CAP_DISCON_ENABLED);
@@ -96,9 +103,9 @@ cpqary3_getcap(struct scsi_address *sa, char *capstr, int tgtonly)
 		return (tgtp->ctlr_flags & CPQARY3_CAP_WIDE_XFER_ENABLED);
 	case SCSI_CAP_ARQ:
 		return ((tgtp->ctlr_flags & CPQARY3_CAP_ARQ_ENABLED) ? 1 : 0);
-	case SCSI_CAP_INITIATOR_ID:
-		return (CTLR_SCSI_ID);
 #endif
+	case SCSI_CAP_INITIATOR_ID:
+		return (7); /* XXX */
 	case SCSI_CAP_UNTAGGED_QING:
 		return (1);
 	case SCSI_CAP_TAGGED_QING:
@@ -155,28 +162,20 @@ cpqary3_setcap(struct scsi_address *sa, char *capstr, int value, int tgtonly)
 	DTRACE_PROBE1(setcap_index, int, index);
 
 	switch (index) {
+	case SCSI_CAP_CDB_LEN:
 	case SCSI_CAP_DMA_MAX:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_DISCONNECT:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_SYNCHRONOUS:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_WIDE_XFER:
 		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_ARQ:
-		return (1);
-	case SCSI_CAP_INITIATOR_ID:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_UNTAGGED_QING:
-		return (1);
 	case SCSI_CAP_TAGGED_QING:
 		return (1);
+	case SCSI_CAP_INITIATOR_ID:
 	case SCSI_CAP_SECTOR_SIZE:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_TOTAL_SECTORS:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_GEOMETRY:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_RESET_NOTIFICATION:
 		return (CAP_CHG_NOT_ALLOWED);
 	default:

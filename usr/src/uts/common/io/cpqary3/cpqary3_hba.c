@@ -38,6 +38,16 @@ cpqary3_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	}
 
 	/*
+	 * XXX Expose the controller as a target... SIGH
+	 */
+	if (sd->sd_address.a_target == 7 && sd->sd_address.a_lun == 0) {
+		cptg->cptg_controller_target = B_TRUE;
+		mutex_enter(&cpq->cpq_mutex);
+		list_insert_tail(&cpq->cpq_targets, cptg);
+		goto skip;
+	}
+
+	/*
 	 * Look for a logical volume for the SCSI address of this target.
 	 */
 	mutex_enter(&cpq->cpq_mutex);
@@ -48,11 +58,12 @@ cpqary3_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 		return (DDI_FAILURE);
 	}
 
-	cptg->cptg_scsi_dev = sd;
-	VERIFY(sd->sd_dev == tgt_dip); /* XXX */
-
 	cptg->cptg_volume = cplv;
 	list_insert_tail(&cplv->cplv_targets, cptg);
+
+skip:
+	cptg->cptg_scsi_dev = sd;
+	VERIFY(sd->sd_dev == tgt_dip); /* XXX */
 
 	/*
 	 * We passed SCSI_HBA_TRAN_CLONE to scsi_hba_attach(9F), so
@@ -91,7 +102,14 @@ cpqary3_tran_tgt_free(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	 */
 
 	mutex_enter(&cpq->cpq_mutex);
-	list_remove(&cplv->cplv_targets, cptg);
+	if (cptg->cptg_controller_target) {
+		/*
+		 * XXX
+		 */
+		list_remove(&cpq->cpq_targets, cptg);
+	} else {
+		list_remove(&cplv->cplv_targets, cptg);
+	}
 	mutex_exit(&cpq->cpq_mutex);
 
 	kmem_free(cptg, sizeof (*cptg));
@@ -118,6 +136,7 @@ cpqary3_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 	cpqary3_command_scsa_t *cpcms = (cpqary3_command_scsa_t *)
 	    pkt->pkt_ha_private;
 	cpqary3_command_t *cpcm;
+	int kmflags = callback == SLEEP_FUNC ? KM_SLEEP : KM_NOSLEEP;
 
 	/*
 	 * The SCSI framework has allocated a packet, and our private
@@ -137,6 +156,8 @@ cpqary3_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 		 * The CDB member of the Request Block of a controller
 		 * command is fixed at 16 bytes.
 		 */
+		dev_err(cpq->dip, CE_WARN, "oversize CDB: had %u, needed %u",
+		    16, pkt->pkt_cdblen);
 		return (-1);
 	}
 	if (pkt->pkt_scblen > CISS_SENSEINFOBYTES) {
@@ -144,15 +165,16 @@ cpqary3_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 		 * The SCB is the "SenseInfo[]" member of the "ErrorInfo_t".
 		 * This is statically allocated; make sure it is big enough.
 		 */
+		dev_err(cpq->dip, CE_WARN, "oversize SENSE BYTES: had %u, "
+		    "needed %u", CISS_SENSEINFOBYTES, pkt->pkt_scblen);
 		return (-1);
 	}
 
 	/*
 	 * Allocate our command block:
-	 * XXX should be passing through the SLEEP_FUCN/NULL_FUNC here
-	 * as kmflags...
 	 */
-	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_OS)) == NULL) {
+	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_OS, kmflags)) ==
+	    NULL) {
 		return (-1);
 	}
 	cpcm->cpcm_scsa = cpcms;
@@ -283,11 +305,24 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 		    pkt->pkt_cookies[i].dmac_size;
 	}
 
-	/*
-	 * Copy logical volume address from the target object:
-	 */
-	cpcm->cpcm_va_cmd->Header.LUN.LogDev = cpcm->cpcm_target->
-	    cptg_volume->cplv_addr;
+	if (cpcm->cpcm_target->cptg_controller_target) {
+		/*
+		 * XXX use cpqary3_write_lun_addr_phys()
+		 */
+		LUNAddr_t *lun = &cpcm->cpcm_va_cmd->Header.LUN;
+
+		lun->PhysDev.Mode = MASK_PERIPHERIAL_DEV_ADDR;
+		lun->PhysDev.TargetId = 0;
+		lun->PhysDev.Bus = 0;
+
+		bzero(&lun->PhysDev.Target, sizeof (lun->PhysDev.Target));
+	} else {
+		/*
+		 * Copy logical volume address from the target object:
+		 */
+		cpcm->cpcm_va_cmd->Header.LUN.LogDev = cpcm->cpcm_target->
+		    cptg_volume->cplv_addr;
+	}
 
 	/*
 	 * Initialise the command block.
@@ -361,11 +396,6 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 		 */
 		return (r == EAGAIN ? TRAN_BUSY : TRAN_FATAL_ERROR);
 	}
-
-	dev_err(cpq->dip, CE_WARN, "SCSI OUT targ %3x opcode %x len %u",
-	    cpcm->cpcm_target->cptg_scsi_dev->sd_address.a_target,
-	    (unsigned)cpcm->cpcm_va_cmd->Request.CDB[0],
-	    pkt->pkt_cdblen);
 
 	/*
 	 * Update the SCSI packet to reflect submission of the command.

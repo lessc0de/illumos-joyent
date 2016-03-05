@@ -305,6 +305,7 @@ struct cpqary3 {
 	kcondvar_t		cpq_cv_finishq;
 
 	list_t			cpq_volumes;
+	list_t			cpq_targets;
 
 	/*
 	 * Controller Heartbeat Tracking
@@ -373,12 +374,19 @@ typedef struct cpqary3_volume {
  */
 typedef struct cpqary3_target {
 	struct scsi_device	*cptg_scsi_dev;
+	boolean_t		cptg_controller_target;
 
 	/*
 	 * Linkage back to the Logical Volume that this target represents:
 	 */
 	cpqary3_volume_t	*cptg_volume;
 	list_node_t		cptg_link_volume;
+
+	/*
+	 * Linkage back to the controller:
+	 */
+	cpqary3_t		*cptg_ctlr;
+	list_node_t		cptg_link_ctlr;
 } cpqary3_target_t;
 
 
@@ -521,13 +529,13 @@ void cpqary3_poll_for(cpqary3_t *, cpqary3_command_t *);
  * Memory management.
  */
 caddr_t cpqary3_alloc_phyctgs_mem(cpqary3_t *, size_t, uint32_t *,
-    cpqary3_phyctg_t *);
+    cpqary3_phyctg_t *, int);
 void cpqary3_free_phyctgs_mem(cpqary3_phyctg_t *, uint8_t);
 
 /*
  * Synchronous command routines.
  */
-cpqary3_command_t *cpqary3_synccmd_alloc(cpqary3_t *, size_t);
+cpqary3_command_t *cpqary3_synccmd_alloc(cpqary3_t *, size_t, int);
 void cpqary3_synccmd_free(cpqary3_t *, cpqary3_command_t *);
 int cpqary3_synccmd_send(cpqary3_t *, cpqary3_command_t *, clock_t, int);
 
@@ -578,8 +586,10 @@ void cpqary3_process_finishq(cpqary3_t *);
 /*
  * Command object management.
  */
-cpqary3_command_t *cpqary3_command_alloc(cpqary3_t *, cpqary3_command_type_t);
-cpqary3_command_internal_t *cpqary3_command_internal_alloc(cpqary3_t *, size_t);
+cpqary3_command_t *cpqary3_command_alloc(cpqary3_t *, cpqary3_command_type_t,
+    int);
+cpqary3_command_internal_t *cpqary3_command_internal_alloc(cpqary3_t *,
+    size_t, int);
 void cpqary3_command_free(cpqary3_command_t *);
 cpqary3_command_t *cpqary3_lookup_inflight(cpqary3_t *, uint32_t);
 void cpqary3_command_reuse(cpqary3_command_t *);

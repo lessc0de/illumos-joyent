@@ -80,7 +80,7 @@ cpqary3_send_abortcmd(cpqary3_t *cpq, cpqary3_target_t *tgtp,
 	 * Update the Command List accordingly
 	 * Submit the command and wait for a signal
 	 */
-	if ((cpcm = cpqary3_synccmd_alloc(cpq, 0)) == NULL) {
+	if ((cpcm = cpqary3_synccmd_alloc(cpq, 0, KM_NOSLEEP)) == NULL) {
 		return (ENOMEM);
 	}
 
@@ -150,7 +150,7 @@ cpqary3_flush_cache(cpqary3_t *cpqary3p)
 
 	/* grab a command and allocate a dma buffer */
 	if ((cpcm = cpqary3_synccmd_alloc(cpqary3p,
-	    sizeof (flushcache_buf_t))) == NULL) {
+	    sizeof (flushcache_buf_t), KM_NOSLEEP)) == NULL) {
 		dev_err(cpqary3p->dip, CE_WARN, "flush cache failed: memory");
 		return (ENOMEM);
 	}

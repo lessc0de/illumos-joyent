@@ -41,13 +41,17 @@ extern ddi_device_acc_attr_t	cpqary3_dev_attributes;
 
 caddr_t
 cpqary3_alloc_phyctgs_mem(cpqary3_t *ctlr, size_t size_mempool,
-    uint32_t *phyaddr, cpqary3_phyctg_t *phyctgp)
+    uint32_t *phyaddr, cpqary3_phyctg_t *phyctgp, int kmflags)
 {
 	size_t real_len;
 	int32_t retvalue;
 	caddr_t mempool = NULL;
 	uint8_t cleanstat = 0;
 	uint32_t cookiecnt;
+	int (*dma_wait)(caddr_t) = (kmflags == KM_SLEEP) ? DDI_DMA_SLEEP :
+	    DDI_DMA_DONTWAIT;
+
+	VERIFY(kmflags == KM_SLEEP || kmflags == KM_NOSLEEP);
 
 	/*
 	 * Allocation of Physical Contigous Memory follws:
@@ -62,7 +66,7 @@ cpqary3_alloc_phyctgs_mem(cpqary3_t *ctlr, size_t size_mempool,
 
 	if (DDI_SUCCESS !=
 	    (retvalue = ddi_dma_alloc_handle((dev_info_t *)ctlr->dip,
-	    &cpqary3_ctlr_dma_attr, DDI_DMA_DONTWAIT, 0,
+	    &cpqary3_ctlr_dma_attr, dma_wait, 0,
 	    &phyctgp->cpqary3_dmahandle))) {
 		switch (retvalue) {
 		case DDI_DMA_NORESOURCES:
@@ -86,7 +90,7 @@ cpqary3_alloc_phyctgs_mem(cpqary3_t *ctlr, size_t size_mempool,
 
 	retvalue = ddi_dma_mem_alloc(phyctgp->cpqary3_dmahandle,
 	    size_mempool, &cpqary3_dev_attributes,
-	    DDI_DMA_CONSISTENT, DDI_DMA_DONTWAIT, 0, &mempool, &real_len,
+	    DDI_DMA_CONSISTENT, dma_wait, 0, &mempool, &real_len,
 	    &phyctgp->cpqary3_acchandle);
 
 	if (DDI_SUCCESS != retvalue) {
@@ -102,7 +106,7 @@ cpqary3_alloc_phyctgs_mem(cpqary3_t *ctlr, size_t size_mempool,
 
 	retvalue = ddi_dma_addr_bind_handle(phyctgp->cpqary3_dmahandle,
 	    NULL, mempool, real_len,
-	    DDI_DMA_CONSISTENT | DDI_DMA_RDWR, DDI_DMA_DONTWAIT, 0,
+	    DDI_DMA_CONSISTENT | DDI_DMA_RDWR, dma_wait, 0,
 	    &phyctgp->cpqary3_dmacookie, &cookiecnt);
 
 	if (DDI_DMA_MAPPED == retvalue) {

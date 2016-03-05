@@ -38,11 +38,14 @@ cpqary3_set_new_tag(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 }
 
 cpqary3_command_t *
-cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type)
+cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type,
+    int kmflags)
 {
 	cpqary3_command_t *cpcm;
 
-	if ((cpcm = kmem_zalloc(sizeof (*cpcm), KM_NOSLEEP)) == NULL) {
+	VERIFY(kmflags == KM_SLEEP || kmflags == KM_NOSLEEP);
+
+	if ((cpcm = kmem_zalloc(sizeof (*cpcm), kmflags)) == NULL) {
 		return (NULL);
 	}
 
@@ -84,7 +87,8 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type)
 	 */
 
 	if ((cpcm->cpcm_va_cmd = (void *)cpqary3_alloc_phyctgs_mem(cpq,
-	    contig_size, &cpcm->cpcm_pa_cmd, &cpcm->cpcm_phyctg)) == NULL) {
+	    contig_size, &cpcm->cpcm_pa_cmd, &cpcm->cpcm_phyctg,
+	    kmflags)) == NULL) {
 		kmem_free(cpcm, sizeof (*cpcm));
 		return (NULL);
 	}
@@ -117,16 +121,18 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type)
 }
 
 cpqary3_command_internal_t *
-cpqary3_command_internal_alloc(cpqary3_t *cpq, size_t len)
+cpqary3_command_internal_alloc(cpqary3_t *cpq, size_t len, int kmflags)
 {
 	cpqary3_command_internal_t *cpcmi;
 
-	if ((cpcmi = kmem_zalloc(sizeof (*cpcmi), KM_NOSLEEP)) == NULL) {
+	VERIFY(kmflags == KM_SLEEP || kmflags == KM_NOSLEEP);
+
+	if ((cpcmi = kmem_zalloc(sizeof (*cpcmi), kmflags)) == NULL) {
 		return (NULL);
 	}
 
 	if ((cpcmi->cpcmi_va = (void *)cpqary3_alloc_phyctgs_mem(cpq, len,
-	    &cpcmi->cpcmi_pa, &cpcmi->cpcmi_phyctg)) == NULL) {
+	    &cpcmi->cpcmi_pa, &cpcmi->cpcmi_phyctg, kmflags)) == NULL) {
 		kmem_free(cpcmi, sizeof (*cpcmi));
 		return (NULL);
 	}

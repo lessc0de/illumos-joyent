@@ -135,12 +135,12 @@ cpqary3_target_geometry(struct scsi_address *sa)
  * Return Values:   	memp
  */
 cpqary3_command_t *
-cpqary3_synccmd_alloc(cpqary3_t *cpq, size_t bufsz)
+cpqary3_synccmd_alloc(cpqary3_t *cpq, size_t bufsz, int kmflags)
 {
 	cpqary3_command_t *cpcm;
 
-	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_SYNCCMD)) ==
-	    NULL) {
+	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_SYNCCMD,
+	    kmflags)) == NULL) {
 		return (NULL);
 	}
 
@@ -149,7 +149,7 @@ cpqary3_synccmd_alloc(cpqary3_t *cpq, size_t bufsz)
 	}
 
 	if ((cpcm->cpcm_internal = cpqary3_command_internal_alloc(cpq,
-	    bufsz)) == NULL) {
+	    bufsz, kmflags)) == NULL) {
 		cpqary3_command_free(cpcm);
 		return (NULL);
 	}

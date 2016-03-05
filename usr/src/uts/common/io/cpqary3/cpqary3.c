@@ -250,6 +250,8 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	    offsetof(cpqary3_command_t, cpcm_link_finish));
 	list_create(&cpq->cpq_volumes, sizeof (cpqary3_volume_t),
 	    offsetof(cpqary3_volume_t, cplv_link));
+	list_create(&cpq->cpq_targets, sizeof (cpqary3_target_t),
+	    offsetof(cpqary3_target_t, cptg_link_ctlr));
 	avl_create(&cpq->cpq_inflight, cpqary3_command_comparator,
 	    sizeof (cpqary3_command_t), offsetof(cpqary3_command_t,
 	    cpcm_node));
