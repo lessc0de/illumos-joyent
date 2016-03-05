@@ -73,19 +73,6 @@ extern "C" {
 #define	CISS_RESET_CTLR				0x0
 #define	CISS_RESET_TGT				0x3
 
-/*
- * The Controller SCSI ID is 7. Hence, when ever the OS issues a command
- * for a target with ID greater than 7, the intended Logical Drive is
- * actually one less than the issued ID.
- * So, the allignment.
- * The Mapping from OS to the HBA is as follows:
- *	OS Target IDs		HBA taret IDs
- *		0 - 6				0 - 6
- *		7					- (Controller)
- *		8 - 32				7 - 31
- */
-#define	CPQARY3_TGT_ALIGNMENT			0x1
-
 #define	CPQARY3_CDBLEN_12			12
 #define	CPQARY3_CDBLEN_16			16
 
@@ -125,41 +112,10 @@ typedef struct cpqary3_report_logical_lun_req {
 
 
 
-
 typedef struct flushcache {
 	uint16_t	disable_flag;
 	uint8_t		reserved[510];
 } flushcache_buf_t;
-
-typedef struct each_logical_lun_data {
-	uint32_t	logical_id:30;
-	uint32_t	mode:2;
-	uint8_t		reserved[4];
-} each_ll_data_t;
-
-typedef struct rll_data {
-	uint8_t			lunlist_byte3;
-	uint8_t			lunlist_byte2;
-	uint8_t			lunlist_byte1;
-	uint8_t			lunlist_byte0;
-	uint32_t		reserved;
-	each_ll_data_t	ll_data[MAX_LOGDRV];
-} rll_data_t;
-
-typedef struct each_physical_lun_data {
-	uint32_t	    DevID;
-	uint32_t	    SecLevel;
-} each_pl_data_t;
-
-typedef struct rpl_data {
-	uint8_t			lunlist_byte3;
-	uint8_t			lunlist_byte2;
-	uint8_t			lunlist_byte1;
-	uint8_t			lunlist_byte0;
-	uint32_t		reserved;
-	PhysDevAddr_t	pl_data[CPQARY3_MAX_TGT];
-} rpl_data_t;
-
 
 /*
  * Format of the data returned for the IDENTIFY LOGICAL DRIVE Command

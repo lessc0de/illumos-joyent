@@ -227,11 +227,13 @@ cpqary3_process_finishq(cpqary3_t *cpq)
 		 */
 		if (ddi_dma_sync(cpcm->cpcm_phyctg.cpqary3_dmahandle, 0,
 		    cpcm->cpcm_phyctg.real_size,
-		    DDI_DMA_SYNC_FORKERNEL) != DDI_SUCCESS) {
+		    DDI_DMA_SYNC_FORCPU) != DDI_SUCCESS) {
 			dev_err(cpq->dip, CE_WARN,
 			    "finishq DMA sync failure");
 			/*
 			 * XXX what to do about this?!
+			 * Apparently this can only fail if we get the
+			 * address range wrong, so it seems best to panic.
 			 */
 		}
 
@@ -259,23 +261,12 @@ cpqary3_poll_for(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 
 	while (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLL_COMPLETE)) {
 		cv_wait(&cpq->cpq_cv_finishq, &cpq->cpq_mutex);
-	}
-
-#if 0
-	/*
-	 * Ensure this command is no longer in the inflight AVL.
-	 */
-	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT) {
-		cpcm->cpcp_status &= ~CPQARY3_CMD_STATUS_INFLIGHT;
-		avl_remove(&cpq->cpq_inflight, cpcm);
 
 		/*
-		 * Mark it timed out.
+		 * XXX If we are ddi_in_panic(), we should drive the
+		 * polling ourselves with a spinloop.
 		 */
-		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_TIMEOUT |
-		    CPQARY3_CMD_STATUS_COMPLETE;
 	}
-#endif
 
 	/*
 	 * Fire the completion callback for this command.  The callback

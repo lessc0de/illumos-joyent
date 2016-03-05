@@ -115,17 +115,6 @@ cpqary3_tran_tgt_free(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	kmem_free(cptg, sizeof (*cptg));
 }
 
-#if 0
-static int
-cpqary3_tran_pkt_constructor(struct scsi_pkt *pkt, scsi_hba_tran_t *tran,
-    int kmflags)
-{
-	cpqary3_t *cpq = tran->tran_hba_private;
-	cpqary3_command_scsa_t *cpcms =
-	    (cpqary3_command_scsa_t *)pkt->pkt_hba_private;
-}
-#endif
-
 static int
 cpqary3_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
     caddr_t arg)
