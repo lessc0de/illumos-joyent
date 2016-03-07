@@ -380,9 +380,11 @@ cpqary3_cleanup(cpqary3_t *cpq)
 		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_PERIODIC;
 	}
 
+	cpqary3_hba_teardown(cpq);
+
 	cpqary3_ctlr_teardown(cpq);
 
-	cpqary3_hba_teardown(cpq);
+	cpqary3_device_teardown(cpq);
 
 	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_BASIC) {
 		mutex_destroy(&cpq->cpq_mutex);
@@ -399,7 +401,6 @@ cpqary3_cleanup(cpqary3_t *cpq)
 		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_BASIC;
 	}
 
-	cpqary3_device_teardown(cpq);
 
 	VERIFY0(cpq->cpq_init_level);
 

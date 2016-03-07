@@ -165,57 +165,6 @@ typedef enum cpqary3_ctlr_mode {
 #include "cpqary3_mem.h"
 #include "cpqary3_scsi.h"
 
-#if 0
-/*
- * Per Target Structure
- */
-typedef enum cpqary3_target_type {
-	CPQARY3_TARGET_TYPE_CONTROLLER = 1,
-	CPQARY3_TARGET_TYPE_VOLUME
-} cpqary3_target_type_t;
-typedef struct cpqary3_target cpqary3_target_t;
-struct cpqary3_target {
-	/*
-	 * Controller-side logical unit number.  The OS-side target number can
-	 * be calculated by XXX
-	 */
-	unsigned		cpqt_logical_id;
-	cpqary3_target_type_t	cpqt_type;
-	dev_info_t		*cpqt_dip;
-};
-
-typedef struct cpqary3_target cpqary3_tgt_t;
-struct cpqary3_target {
-	uint32_t	logical_id:30; /* at most 64 : 63 drives + 1 CTLR */
-	uint32_t	type:2; /* CPQARY3_TARGET_* values */
-	PhysDevAddr_t	PhysID;
-	union {
-		struct {
-			uint8_t	id;
-			uint8_t	bus;
-		} scsi;		/* To support tapes */
-		struct {
-			uint8_t	heads;
-			uint8_t	sectors;
-		} drive;	/* Logical drives */
-	} properties;
-
-	uint32_t	ctlr_flags;
-	dev_info_t	*tgt_dip;
-	ddi_dma_attr_t	dma_attrs;
-};
-
-
-/*
- * Values for "type" on "cpqary3_tgt_t".
- */
-#define	CPQARY3_TARGET_NONE		0	/* No Device */
-#define	CPQARY3_TARGET_CTLR		1	/* Controller */
-#define	CPQARY3_TARGET_LOG_VOL		2	/* Logical Volume */
-#define	CPQARY3_TARGET_TAPE		3	/* SCSI Device - Tape */
-#endif
-
-
 /*
  * Interrupt status and mask values
  */
