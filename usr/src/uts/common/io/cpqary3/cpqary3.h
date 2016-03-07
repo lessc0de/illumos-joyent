@@ -413,7 +413,20 @@ typedef enum cpqary3_command_status {
 	CPQARY3_CMD_STATUS_USED =		(0x1 << 0),
 	CPQARY3_CMD_STATUS_INFLIGHT =		(0x1 << 1),
 
+	/*
+	 * This flag is set during abort queue processing to record that this
+	 * command was aborted in response to an expired timeout, and not some
+	 * other cancellation.  If the controller is able to abort the command,
+	 * we use this flag to let the SCSI framework know that the command
+	 * timed out.
+	 */
 	CPQARY3_CMD_STATUS_TIMEOUT =		(0x1 << 2),
+
+	/*
+	 * The controller set the error bit when completing this command.
+	 * Details of the particular fault may be read from the error
+	 * information written by the controller.
+	 */
 	CPQARY3_CMD_STATUS_ERROR =		(0x1 << 3),
 
 	/*
