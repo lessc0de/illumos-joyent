@@ -2152,13 +2152,14 @@ DR_SAS_OBJS = dr_sas.o
 # XXX disabled cpqary3_noe.o cpqary3_ioctl.o
 CPQARY3_OBJS =	cpqary3.o \
 		cpqary3_transport.o cpqary3_mem.o	\
-		cpqary3_scsi.o cpqary3_util.o	\
+		cpqary3_scsi.o \
 		cpqary3_bd.o \
 		cpqary3_device.o \
 		cpqary3_interrupts.o \
 		cpqary3_commands.o \
 		cpqary3_logvol.o \
 		cpqary3_hba.o \
+		cpqary3_user.o \
 		cpqary3_ciss_simple.o \
 		cpqary3_ciss.o \
 

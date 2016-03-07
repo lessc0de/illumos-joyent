@@ -37,6 +37,23 @@ cpqary3_set_new_tag(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	}
 }
 
+static int
+cpqary3_check_command_type(cpqary3_command_type_t type)
+{
+	/*
+	 * Note that we leave out the default case in order to utilise
+	 * compiler warnings about missed enum values.
+	 */
+	switch (type) {
+	case CPQARY3_CMDTYPE_ABORTQ:
+	case CPQARY3_CMDTYPE_SCSA:
+	case CPQARY3_CMDTYPE_INTERNAL:
+		return (type);
+	}
+
+	panic("unexpected command type");
+}
+
 cpqary3_command_t *
 cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type,
     int kmflags)
@@ -50,15 +67,7 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type,
 	}
 
 	cpcm->cpcm_ctlr = cpq;
-
-	switch (type) {
-	case CPQARY3_CMDTYPE_OS:
-	case CPQARY3_CMDTYPE_SYNCCMD:
-		break;
-	default:
-		panic("unexpected type");
-	}
-	cpcm->cpcm_type = type;
+	cpcm->cpcm_type = cpqary3_check_command_type(type);
 
 	mutex_enter(&cpq->cpq_mutex);
 	cpqary3_set_new_tag(cpq, cpcm);
@@ -120,26 +129,34 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type,
 	return (cpcm);
 }
 
-cpqary3_command_internal_t *
-cpqary3_command_internal_alloc(cpqary3_t *cpq, size_t len, int kmflags)
+int
+cpqary3_command_attach_internal(cpqary3_t *cpq, cpqary3_command_t *cpcm,
+    size_t len, int kmflags)
 {
 	cpqary3_command_internal_t *cpcmi;
 
 	VERIFY(kmflags == KM_SLEEP || kmflags == KM_NOSLEEP);
 
 	if ((cpcmi = kmem_zalloc(sizeof (*cpcmi), kmflags)) == NULL) {
-		return (NULL);
+		return (ENOMEM);
 	}
 
 	if ((cpcmi->cpcmi_va = (void *)cpqary3_alloc_phyctgs_mem(cpq, len,
 	    &cpcmi->cpcmi_pa, &cpcmi->cpcmi_phyctg, kmflags)) == NULL) {
 		kmem_free(cpcmi, sizeof (*cpcmi));
-		return (NULL);
+		return (ENOMEM);
 	}
 
 	bzero(cpcmi->cpcmi_va, cpcmi->cpcmi_len);
 
-	return (cpcmi);
+	cpcm->cpcm_internal = cpcmi;
+
+	cpcm->cpcm_va_cmd->SG[0].Addr = cpcmi->cpcmi_pa;
+	cpcm->cpcm_va_cmd->SG[0].Len = len;
+	cpcm->cpcm_va_cmd->Header.SGList = 1;
+	cpcm->cpcm_va_cmd->Header.SGTotal = 1;
+
+	return (0);
 }
 
 void
@@ -192,4 +209,16 @@ cpqary3_command_free(cpqary3_command_t *cpcm)
 	mutex_exit(&cpq->cpq_mutex);
 
 	kmem_free(cpcm, sizeof (*cpcm));
+}
+
+cpqary3_command_t *
+cpqary3_lookup_inflight(cpqary3_t *cpq, uint32_t tag)
+{
+	VERIFY(MUTEX_HELD(&cpq->cpq_mutex));
+
+	cpqary3_command_t srch;
+
+	srch.cpcm_tag = tag;
+
+	return (avl_find(&cpq->cpq_inflight, &srch, NULL));
 }

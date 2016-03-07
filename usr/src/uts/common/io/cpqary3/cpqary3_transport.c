@@ -29,41 +29,12 @@ static boolean_t cpqary3_is_scsi_read_write(struct scsi_pkt *scsi_pktp);
 
 extern ddi_dma_attr_t cpqary3_dma_attr;
 
-static void
-cpqary3_set_arq_data(struct scsi_pkt *pkt, uchar_t key)
-{
-	struct scsi_arq_status *arqstat;
-
-	arqstat = (struct scsi_arq_status *)(pkt->pkt_scbp);
-
-	arqstat->sts_status.sts_chk = 1; /* CHECK CONDITION */
-	arqstat->sts_rqpkt_reason = CMD_CMPLT;
-	arqstat->sts_rqpkt_resid = 0;
-	arqstat->sts_rqpkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-	    STATE_SENT_CMD | STATE_XFERRED_DATA;
-	arqstat->sts_rqpkt_statistics = 0;
-	arqstat->sts_sensedata.es_valid = 1;
-	arqstat->sts_sensedata.es_class = CLASS_EXTENDED_SENSE;
-	arqstat->sts_sensedata.es_key = key;
-}
-
-/*
- * Function	:	cpqary3_getcap
- * Description	: 	This routine is called to get the current value of a
- *			capability.(SCSI transport capability)
- * Called By	: 	kernel
- * Parameters	: 	SCSI address, capability identifier, target(s) affected
- * Calls	: 	None
- * Return Values: 	current value of capability / -1 (if unsupported)
- */
 int
 cpqary3_getcap(struct scsi_address *sa, char *capstr, int tgtonly)
 {
+	scsi_hba_tran_t *tran = sa->a_hba_tran;
+	cpqary3_t *cpq = (cpqary3_t *)tran->tran_hba_private;
 	int index;
-#if 0
-	cpqary3_t *cpq = SA2CTLR(sa);
-	cpqary3_tgt_t *tgtp = cpqary3_target_from_addr(cpq, sa);
-#endif
 
 	/*
 	 * If requested Capability is not supported, return -1.
@@ -88,30 +59,20 @@ cpqary3_getcap(struct scsi_address *sa, char *capstr, int tgtonly)
 	case SCSI_CAP_CDB_LEN:
 		return (16);
 	case SCSI_CAP_DMA_MAX:
-		return ((int)cpqary3_dma_attr.dma_attr_maxxfer);
+		return ((int)cpq->cpq_dma_attr.dma_attr_maxxfer);
 	case SCSI_CAP_DISCONNECT:
 	case SCSI_CAP_SYNCHRONOUS:
 	case SCSI_CAP_WIDE_XFER:
 	case SCSI_CAP_ARQ:
 		return (1);
-#if 0
-	case SCSI_CAP_DISCONNECT:
-		return (tgtp->ctlr_flags & CPQARY3_CAP_DISCON_ENABLED);
-	case SCSI_CAP_SYNCHRONOUS:
-		return (tgtp->ctlr_flags & CPQARY3_CAP_SYNC_ENABLED);
-	case SCSI_CAP_WIDE_XFER:
-		return (tgtp->ctlr_flags & CPQARY3_CAP_WIDE_XFER_ENABLED);
-	case SCSI_CAP_ARQ:
-		return ((tgtp->ctlr_flags & CPQARY3_CAP_ARQ_ENABLED) ? 1 : 0);
-#endif
 	case SCSI_CAP_INITIATOR_ID:
-		return (7); /* XXX */
+		return (CPQARY3_CONTROLLER_TARGET);
 	case SCSI_CAP_UNTAGGED_QING:
 		return (1);
 	case SCSI_CAP_TAGGED_QING:
 		return (1);
 	case SCSI_CAP_SECTOR_SIZE:
-		return (cpqary3_dma_attr.dma_attr_granular);
+		return ((int)cpq->cpq_dma_attr.dma_attr_granular);
 	case SCSI_CAP_TOTAL_SECTORS:
 		return (CAP_NOT_DEFINED);
 #if 0
@@ -125,16 +86,6 @@ cpqary3_getcap(struct scsi_address *sa, char *capstr, int tgtonly)
 	}
 }
 
-/*
- * Function	:	cpqary3_setcap
- * Description	: 	This routine is called to set the current value of a
- *			capability.(SCSI transport capability)
- * Called By	: 	kernel
- * Parameters	: 	SCSI address, capability identifier,
- *			new capability value, target(s) affected
- * Calls	: 	None
- * Return Values: 	SUCCESS / FAILURE / -1 (if capability is unsupported)
- */
 /* ARGSUSED */
 int
 cpqary3_setcap(struct scsi_address *sa, char *capstr, int value, int tgtonly)
@@ -167,17 +118,18 @@ cpqary3_setcap(struct scsi_address *sa, char *capstr, int value, int tgtonly)
 	case SCSI_CAP_DISCONNECT:
 	case SCSI_CAP_SYNCHRONOUS:
 	case SCSI_CAP_WIDE_XFER:
-		return (CAP_CHG_NOT_ALLOWED);
 	case SCSI_CAP_ARQ:
-	case SCSI_CAP_UNTAGGED_QING:
-	case SCSI_CAP_TAGGED_QING:
-		return (1);
 	case SCSI_CAP_INITIATOR_ID:
 	case SCSI_CAP_SECTOR_SIZE:
 	case SCSI_CAP_TOTAL_SECTORS:
+	case SCSI_CAP_UNTAGGED_QING:
+	case SCSI_CAP_TAGGED_QING:
+#if 0
 	case SCSI_CAP_GEOMETRY:
+#endif
 	case SCSI_CAP_RESET_NOTIFICATION:
 		return (CAP_CHG_NOT_ALLOWED);
+
 	default:
 		return (CAP_NOT_DEFINED);
 	}
@@ -188,15 +140,20 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 {
 	cpqary3_t	*cpqary3p = cpcm->cpcm_ctlr;
 	ErrorInfo_t	*errorinfop = cpcm->cpcm_va_err;
-	CommandList_t	*cmdlistp = cpcm->cpcm_va_cmd;
 	struct scsi_pkt	*scsi_pktp = cpcm->cpcm_scsa->cpcms_pkt;
 
 	VERIFY(MUTEX_HELD(&cpqary3p->cpq_mutex));
-	VERIFY(cpcm->cpcm_type == CPQARY3_CMDTYPE_OS);
+	VERIFY(cpcm->cpcm_type == CPQARY3_CMDTYPE_SCSA);
 
-	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_TIMEOUT) {
-		scsi_pktp->pkt_reason = CMD_TIMEOUT;
-		scsi_pktp->pkt_statistics |= STAT_TIMEOUT;
+	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_RESET_SENT) {
+		if (scsi_pktp->pkt_reason != CMD_CMPLT) {
+			/*
+			 * If another error status was previously written,
+			 * do not overwrite it.
+			 */
+			scsi_pktp->pkt_reason = CMD_RESET;
+		}
+		scsi_pktp->pkt_statistics |= STAT_BUS_RESET | STAT_DEV_RESET;
 		goto finish;
 	}
 
@@ -228,16 +185,33 @@ cpqary3_oscmd_complete(cpqary3_command_t *cpcm)
 		scsi_pktp->pkt_state = 0; /* XXX ? */
 		break;
 
+	/*
+	 * The controller has reported completion for a command in response
+	 * to an abort message.
+	 */
 	case CISS_CMD_ABORTED:
 	case CISS_CMD_UNSOLICITED_ABORT:
-		scsi_pktp->pkt_reason = CMD_ABORTED;
+		if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_TIMEOUT) {
+			/*
+			 * This abort was arranged by the periodic routine
+			 * in response to an elapsed timeout.
+			 */
+			scsi_pktp->pkt_reason = CMD_TIMEOUT;
+			scsi_pktp->pkt_statistics |= STAT_TIMEOUT;
+		} else {
+			scsi_pktp->pkt_reason = CMD_ABORTED;
+		}
 		scsi_pktp->pkt_statistics |= STAT_ABORTED;
-		scsi_pktp->pkt_state = STATE_XFERRED_DATA | STATE_GOT_STATUS;
+		scsi_pktp->pkt_state |= STATE_XFERRED_DATA | STATE_GOT_STATUS;
 		break;
 
 	case CISS_CMD_ABORT_FAILED:
 		break;
 
+	/*
+	 * The controller suggests that the timeout we specified in the
+	 * SCSI packet has expired.
+	 */
 	case CISS_CMD_TIMEOUT:
 		scsi_pktp->pkt_reason = CMD_TIMEOUT;
 		scsi_pktp->pkt_statistics |= STAT_TIMEOUT;

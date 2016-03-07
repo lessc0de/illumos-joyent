@@ -11,6 +11,7 @@
 
 /*
  * Copyright (C) 2013 Hewlett-Packard Development Company, L.P.
+ * Copyright 2016 Joyent, Inc.
  */
 
 #ifndef	_CPQARY3_SCSI_H
@@ -71,7 +72,11 @@ extern "C" {
 
 #define	CISS_MSG_RESET				0x1
 #define	CISS_RESET_CTLR				0x0
+#define	CISS_RESET_BUS				0x1
 #define	CISS_RESET_TGT				0x3
+#define	CISS_RESET_LUN				0x4
+
+#define	CISS_MSG_NOP				0x3
 
 #define	CPQARY3_CDBLEN_12			12
 #define	CPQARY3_CDBLEN_16			16

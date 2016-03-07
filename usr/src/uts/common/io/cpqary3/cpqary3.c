@@ -17,54 +17,22 @@
 #include <sys/policy.h>
 #include "cpqary3.h"
 
-/*
- * Local Autoconfiguration Function Prototype Declations
- */
 static int cpqary3_attach(dev_info_t *, ddi_attach_cmd_t);
 static int cpqary3_detach(dev_info_t *, ddi_detach_cmd_t);
 static int cpqary3_ioctl(dev_t, int, intptr_t, int, cred_t *, int *);
-
-/*
- * Local Functions Definitions
- */
-
 static void cpqary3_cleanup(cpqary3_t *);
-static uint8_t cpqary3_update_ctlrdetails(cpqary3_t *, uint32_t *);
 static int cpqary3_command_comparator(const void *, const void *);
 
 /*
- * Per-controller soft state object.
+ * Controller soft state.  Each entry is an object of type "cpqary3_t".
  */
 void *cpqary3_state;
 
 /*
- * HBA minor number schema
- *
- * The minor numbers for any minor device nodes that we create are
- * governed by the SCSA framework.  We use the macros below to
- * fabricate minor numbers for nodes that we own.
- *
- * See sys/impl/transport.h for more info.
+ * DMA attributes template.  Each controller will make a copy of this template
+ * with appropriate customisations; e.g., the Scatter/Gather List Length.
  */
-
-/* Macro to extract interface from minor number */
-#define	CPQARY3_MINOR2INTERFACE(_x)  ((_x) & (TRAN_MINOR_MASK))
-
-/* Base of range assigned to HBAs: */
-#define	SCSA_MINOR_HBABASE  (32)
-
-/* Our minor nodes: */
-#define	CPQARY3_MINOR  (0 + SCSA_MINOR_HBABASE)
-
-/* Convenience macros to convert device instances to minor numbers */
-#define	CPQARY3_INST2x(_i, _x)    (((_i) << INST_MINOR_SHIFT) | (_x))
-#define	CPQARY3_INST2CPQARY3(_i)  CPQARY3_INST2x(_i, CPQARY3_MINOR)
-
-/*
- * The Driver DMA Limit structure.
- * Data used for SMART Integrated Array Controller shall be used.
- */
-ddi_dma_attr_t cpqary3_dma_attr = {
+static ddi_dma_attr_t cpqary3_dma_attr_template = {
 	DMA_ATTR_V0,		/* ddi_dma_attr version */
 	0,			/* Low Address */
 	0xFFFFFFFFFFFFFFFF,	/* High Address */
@@ -80,14 +48,14 @@ ddi_dma_attr_t cpqary3_dma_attr = {
 	 * in the Surge ASIC, with earlier FW versions.
 	 */
 	0xFFFFFFFF,
-	CPQARY3_SG_CNT,		/* Scatter/Gather List Length */
+	1,			/* Scatter/Gather List Length */
 	512,			/* Device Granularity */
 	0			/* DMA flags */
 };
 
 /*
- * DMA access for both device control registers and for command block
- * allocation.
+ * Device memory access attributes for both device control registers and for
+ * command block allocation.
  */
 ddi_device_acc_attr_t cpqary3_dev_attributes = {
 	DDI_DEVICE_ATTR_V0,
@@ -158,11 +126,7 @@ _init()
 {
 	int r;
 
-	/*
-	 * Allocate Soft State Resources; if failure, return.
-	 */
-	VERIFY0(ddi_soft_state_init(&cpqary3_state, sizeof (cpqary3_t),
-	    MAX_CTLRS));
+	VERIFY0(ddi_soft_state_init(&cpqary3_state, sizeof (cpqary3_t), 0));
 
 	if ((r = scsi_hba_init(&cpqary3_modlinkage)) != 0) {
 		goto fail;
@@ -183,41 +147,27 @@ fail:
 int
 _fini()
 {
-	int  retvalue;
+	int r;
 
-	/* Unload the Driver(loadable module) */
-
-	if ((retvalue = mod_remove(&cpqary3_modlinkage)) == 0) {
-
-		/* Cancel the registeration for the HBA Interface */
+	if ((r = mod_remove(&cpqary3_modlinkage)) == 0) {
 		scsi_hba_fini(&cpqary3_modlinkage);
-
-		/* dealloacte soft state resources of the driver */
 		ddi_soft_state_fini(&cpqary3_state);
 	}
 
-	return (retvalue);
+	return (r);
 }
 
 int
 _info(struct modinfo *modinfop)
 {
-	/*
-	 * Get the module information.
-	 */
 	return (mod_info(&cpqary3_modlinkage, modinfop));
 }
 
 static int
 cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 {
-	int8_t		minor_node_name[14];
-	uint32_t	instance;
-	uint32_t	retvalue;
-	cpqary3_t	*cpq;		/* per-controller */
-	ddi_dma_attr_t	tmp_dma_attr;
-	uint_t		(*hw_isr)(caddr_t);
-	uint_t		(*sw_isr)(caddr_t);
+	uint32_t instance;
+	cpqary3_t *cpq;
 
 	if (attach_cmd != DDI_ATTACH) {
 		return (DDI_FAILURE);
@@ -248,6 +198,8 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	    offsetof(cpqary3_command_t, cpcm_link));
 	list_create(&cpq->cpq_finishq, sizeof (cpqary3_command_t),
 	    offsetof(cpqary3_command_t, cpcm_link_finish));
+	list_create(&cpq->cpq_abortq, sizeof (cpqary3_command_t),
+	    offsetof(cpqary3_command_t, cpcm_link_abort));
 	list_create(&cpq->cpq_volumes, sizeof (cpqary3_volume_t),
 	    offsetof(cpqary3_volume_t, cplv_link));
 	list_create(&cpq->cpq_targets, sizeof (cpqary3_target_t),
@@ -280,6 +232,22 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	}
 
 	/*
+	 * Each controller may have a different Scatter/Gather Element count.
+	 * Configure a per-controller set of DMA attributes with the
+	 * appropriate S/G size.
+	 */
+	VERIFY(cpq->cpq_sg_cnt > 0);
+	cpq->cpq_dma_attr = cpqary3_dma_attr_template;
+	cpq->cpq_dma_attr.dma_attr_sgllen = cpq->cpq_sg_cnt;
+
+	/*
+	 * From this point forward, the controller is able to accept commands
+	 * and (at least by polling) return command submissions.  Setting this
+	 * flag allows the rest of the driver to interact with the device.
+	 */
+	cpq->cpq_status |= CPQARY3_CTLR_STATUS_RUNNING;
+
+	/*
 	 * Now that we have selected a Transport Method, we can configure
 	 * the appropriate interrupt handlers.
 	 */
@@ -288,41 +256,16 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 		goto fail;
 	}
 
-	/*
-	 * Allocate HBA transport structure
-	 */
-	if ((cpq->cpq_hba_tran = scsi_hba_tran_alloc(dip,
-	    SCSI_HBA_CANSLEEP)) == NULL) {
-		dev_err(dip, CE_WARN, "scsi_hba_tran_alloc failed");
+	if (cpqary3_hba_setup(cpq) != DDI_SUCCESS) {
+		dev_err(dip, CE_WARN, "SCSI framework setup failed");
 		goto fail;
 	}
-	cpq->cpq_init_level |= CPQARY3_INITLEVEL_HBA_ALLOC;
 
 	/*
-	 * XXX This function should do _all_ of the SCSA HBA driver
-	 * init work.
+	 * Set the appropriate Interrupt Mask Register bits to start
+	 * command completion interrupts from the controller.
 	 */
-	cpqary3_hba_setup(cpq);
-
-	tmp_dma_attr = cpqary3_dma_attr;
-	tmp_dma_attr.dma_attr_sgllen = cpq->cpq_sg_cnt;
-
-	/*
-	 * Register the DMA attributes and the transport vectors
-	 * of each instance of the  HBA device.
-	 */
-	if (scsi_hba_attach_setup(dip, &tmp_dma_attr, cpq->cpq_hba_tran,
-	    SCSI_HBA_TRAN_CLONE) == DDI_FAILURE) {
-		dev_err(dip, CE_WARN, "scsi_hba_attach_setup failed");
-		goto fail;
-	}
-	cpq->cpq_init_level |= CPQARY3_INITLEVEL_HBA_ATTACH;
-
-	/* Enable the Controller Interrupt */
 	cpqary3_intr_set(cpq, B_TRUE);
-	if (cpq->cpq_host_support & 0x4) {
-		cpqary3_lockup_intr_set(cpq, B_TRUE);
-	}
 
 	/*
 	 * Register a periodic function to be called every 15 seconds.
@@ -332,13 +275,18 @@ cpqary3_attach(dev_info_t *dip, ddi_attach_cmd_t attach_cmd)
 	    1 * NANOSEC, DDI_IPL_0);
 	cpq->cpq_init_level |= CPQARY3_INITLEVEL_PERIODIC;
 
-	/* Report that an Instance of the Driver is Attached Successfully */
-	ddi_report_dev(dip);
-
+	/*
+	 * Discover the set of logical volumes attached to this controller:
+	 */
 	if (cpqary3_discover_logical_volumes(cpq, 30) != 0) {
 		dev_err(dip, CE_WARN, "could not discover logical volumes");
 		goto fail;
 	}
+
+	/*
+	 * Announce the attachment of this controller.
+	 */
+	ddi_report_dev(dip);
 
 	return (DDI_SUCCESS);
 
@@ -350,33 +298,45 @@ fail:
 static int
 cpqary3_detach(dev_info_t *dip, ddi_detach_cmd_t detach_cmd)
 {
-	cpqary3_t	*cpqary3p;
-	scsi_hba_tran_t	*hba_tran;
+	scsi_hba_tran_t *tran = (scsi_hba_tran_t *)ddi_get_driver_private(dip);
+	cpqary3_t *cpq = (cpqary3_t *)tran->tran_hba_private;
 
-	/* Return failure, If Command is not DDI_DETACH */
-
-	if (DDI_DETACH != detach_cmd) {
+	if (detach_cmd != DDI_DETACH) {
 		return (DDI_FAILURE);
 	}
 
 	/*
-	 *  Get scsi_hba_tran structure.
-	 *  Get per controller structure.
+	 * First, check to make sure that all SCSI framework targets have
+	 * detached.
 	 */
+	mutex_enter(&cpq->cpq_mutex);
+	if (!list_is_empty(&cpq->cpq_targets)) {
+		mutex_exit(&cpq->cpq_mutex);
+		dev_err(cpq->dip, CE_WARN, "cannot detach; targets still "
+		    "using HBA");
+		return (DDI_FAILURE);
+	}
 
-	hba_tran = (scsi_hba_tran_t *)ddi_get_driver_private(dip);
-	cpqary3p = (cpqary3_t *)hba_tran->tran_hba_private;
+	/*
+	 * Prevent new targets from attaching now:
+	 */
+	cpq->cpq_status |= CPQARY3_CTLR_STATUS_DETACHING;
+	mutex_exit(&cpq->cpq_mutex);
 
-	/* Flush the cache */
+#if 0
+	/*
+	 * Attempt to have the controller flush its write cache out to disk.
+	 * XXX Check for failure?
+	 */
+	cpqary3_flush_cache(cpq);
+#endif
 
-	cpqary3_flush_cache(cpqary3p);
-
-	/* Undo cpqary3_attach */
-
-	cpqary3_cleanup(cpqary3p);
+	/*
+	 * Clean up all remaining resources.
+	 */
+	cpqary3_cleanup(cpq);
 
 	return (DDI_SUCCESS);
-
 }
 
 static int
@@ -384,7 +344,6 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
     int *rval)
 {
 	cpqary3_t *cpq;
-	minor_t cpqary3_minor_num;
 	int inst = MINOR2INST(getminor(dev));
 	int status;
 
@@ -400,6 +359,9 @@ cpqary3_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	}
 
 	switch (cmd) {
+	case CPQARY3_IOCTL_PASSTHROUGH:
+		status = cpqary3_ioctl_passthrough(cpq, arg, mode, rval);
+		break;
 	default:
 		status = scsi_hba_ioctl(dev, cmd, arg, mode, credp, rval);
 		break;
@@ -418,15 +380,9 @@ cpqary3_cleanup(cpqary3_t *cpq)
 		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_PERIODIC;
 	}
 
-	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_HBA_ATTACH) {
-		(void) scsi_hba_detach(cpq->dip);
-		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_HBA_ATTACH;
-	}
+	cpqary3_ctlr_teardown(cpq);
 
-	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_HBA_ALLOC) {
-		scsi_hba_tran_free(cpq->cpq_hba_tran);
-		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_HBA_ALLOC;
-	}
+	cpqary3_hba_teardown(cpq);
 
 	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_BASIC) {
 		mutex_destroy(&cpq->cpq_mutex);

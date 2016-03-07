@@ -15,6 +15,13 @@
 
 #include "cpqary3.h"
 
+static boolean_t
+cpqary3_device_is_controller(struct scsi_device *sd)
+{
+	return (sd->sd_address.a_target == CPQARY3_CONTROLLER_TARGET &&
+	    sd->sd_address.a_lun == 0);
+}
+
 static int
 cpqary3_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
     scsi_hba_tran_t *hba_tran, struct scsi_device *sd)
@@ -24,7 +31,7 @@ cpqary3_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	cpqary3_target_t *cptg;
 
 	/*
-	 * XXX Check to see if new logical volumes are available.
+	 * Check to see if new logical volumes are available.
 	 */
 	if (cpqary3_discover_logical_volumes(cpq, 15) != 0) {
 		dev_err(cpq->dip, CE_WARN, "discover logical volumes failure");
@@ -37,20 +44,30 @@ cpqary3_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 		return (DDI_FAILURE);
 	}
 
+	mutex_enter(&cpq->cpq_mutex);
+
+	if (cpq->cpq_status & CPQARY3_CTLR_STATUS_DETACHING) {
+		/*
+		 * We are detaching.  Do not accept any more requests to
+		 * attach targets from the framework.
+		 */
+		mutex_exit(&cpq->cpq_mutex);
+		kmem_free(cptg, sizeof (*cptg));
+		return (DDI_FAILURE);
+	}
+
 	/*
-	 * XXX Expose the controller as a target... SIGH
+	 * Check to see if this is the SCSI address of the pseudo target
+	 * representing the Smart Array controller itself.
 	 */
-	if (sd->sd_address.a_target == 7 && sd->sd_address.a_lun == 0) {
+	if (cpqary3_device_is_controller(sd)) {
 		cptg->cptg_controller_target = B_TRUE;
-		mutex_enter(&cpq->cpq_mutex);
-		list_insert_tail(&cpq->cpq_targets, cptg);
-		goto skip;
+		goto skip_logvol;
 	}
 
 	/*
 	 * Look for a logical volume for the SCSI address of this target.
 	 */
-	mutex_enter(&cpq->cpq_mutex);
 	if ((cplv = cpqary3_lookup_volume_by_addr(cpq, &sd->sd_address)) ==
 	    NULL) {
 		mutex_exit(&cpq->cpq_mutex);
@@ -61,26 +78,23 @@ cpqary3_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	cptg->cptg_volume = cplv;
 	list_insert_tail(&cplv->cplv_targets, cptg);
 
-skip:
+skip_logvol:
+	/*
+	 * Link this target object to the controller:
+	 */
+	cptg->cptg_ctlr = cpq;
+	list_insert_tail(&cpq->cpq_targets, cptg);
+
 	cptg->cptg_scsi_dev = sd;
-	VERIFY(sd->sd_dev == tgt_dip); /* XXX */
+	VERIFY(sd->sd_dev == tgt_dip);
 
 	/*
 	 * We passed SCSI_HBA_TRAN_CLONE to scsi_hba_attach(9F), so
 	 * we can stash our target-specific data structure on the
-	 * (cloned) "hba_tran" without affecting the HBA-level
-	 * private data pointer.
+	 * (cloned) "hba_tran" without affecting the private
+	 * private data pointers of the HBA or of other targets.
 	 */
 	hba_tran->tran_tgt_private = cptg;
-
-	/*
-	 * XXX
-	 * Note that we used to turn on these caps:
-	 * 	CPQARY3_CAP_DISCON_ENABLED
-	 * 	CPQARY3_CAP_SYNC_ENABLED
-	 * 	CPQARY3_CAP_WIDE_XFER_ENABLED
-	 * 	CPQARY3_CAP_ARQ_ENABLED
-	 */
 
 	mutex_exit(&cpq->cpq_mutex);
 	return (DDI_SUCCESS);
@@ -96,20 +110,21 @@ cpqary3_tran_tgt_free(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 
 	VERIFY(cptg->cptg_scsi_dev == sd);
 
+	mutex_enter(&cpq->cpq_mutex);
+
 	/*
 	 * XXX Make sure that there are no outstanding commands for this
 	 * target.
 	 */
 
-	mutex_enter(&cpq->cpq_mutex);
-	if (cptg->cptg_controller_target) {
-		/*
-		 * XXX
-		 */
-		list_remove(&cpq->cpq_targets, cptg);
-	} else {
+	/*
+	 * Remove this target from the tracking lists:
+	 */
+	if (!cptg->cptg_controller_target) {
 		list_remove(&cplv->cplv_targets, cptg);
 	}
+	list_remove(&cpq->cpq_targets, cptg);
+
 	mutex_exit(&cpq->cpq_mutex);
 
 	kmem_free(cptg, sizeof (*cptg));
@@ -154,23 +169,23 @@ cpqary3_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 		 * The SCB is the "SenseInfo[]" member of the "ErrorInfo_t".
 		 * This is statically allocated; make sure it is big enough.
 		 */
-		dev_err(cpq->dip, CE_WARN, "oversize SENSE BYTES: had %u, "
-		    "needed %u", CISS_SENSEINFOBYTES, pkt->pkt_scblen);
+		dev_err(cpq->dip, CE_WARN, "oversize SCB: had %u, needed %u",
+		    CISS_SENSEINFOBYTES, pkt->pkt_scblen);
 		return (-1);
 	}
 
 	/*
 	 * Allocate our command block:
 	 */
-	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_OS, kmflags)) ==
-	    NULL) {
+	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_SCSA,
+	    kmflags)) == NULL) {
 		return (-1);
 	}
 	cpcm->cpcm_scsa = cpcms;
 	cpcms->cpcms_command = cpcm;
 	cpcms->cpcms_pkt = pkt;
 
-	pkt->pkt_cdbp = cpcm->cpcm_va_cmd->Request.CDB;
+	pkt->pkt_cdbp = &cpcm->cpcm_va_cmd->Request.CDB[0];
 	cpcm->cpcm_va_cmd->Request.CDBLen = pkt->pkt_cdblen;
 
 	pkt->pkt_scbp = (uchar_t *)&cpcm->cpcm_va_err->SenseInfo;
@@ -190,8 +205,6 @@ cpqary3_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 static void
 cpqary3_tran_teardown_pkt(struct scsi_pkt *pkt)
 {
-	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
-	cpqary3_t *cpq = (cpqary3_t *)tran->tran_hba_private;
 	cpqary3_command_scsa_t *cpcms = (cpqary3_command_scsa_t *)
 	    pkt->pkt_ha_private;
 	cpqary3_command_t *cpcm = cpcms->cpcms_command;
@@ -255,8 +268,10 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 	case SCMD_MODE_SELECT:
 	case SCMD_PERSISTENT_RESERVE_IN:
 		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_TRAN_IGNORED;
+
 		dev_err(cpq->dip, CE_WARN, "ignored SCSI cmd %02x",
 		    (unsigned)pkt->pkt_cdbp[0]); /* XXX */
+
 		cpqary3_set_arq_data(pkt, KEY_ILLEGAL_REQUEST);
 		pkt->pkt_reason = CMD_BADMSG;
 		pkt->pkt_state |= STATE_GOT_BUS | STATE_GOT_TARGET |
@@ -296,15 +311,11 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 
 	if (cpcm->cpcm_target->cptg_controller_target) {
 		/*
-		 * XXX use cpqary3_write_lun_addr_phys()
+		 * The controller is, according to the CISS Specification,
+		 * always LUN 0 in the peripheral device addressing mode.
 		 */
-		LUNAddr_t *lun = &cpcm->cpcm_va_cmd->Header.LUN;
-
-		lun->PhysDev.Mode = MASK_PERIPHERIAL_DEV_ADDR;
-		lun->PhysDev.TargetId = 0;
-		lun->PhysDev.Bus = 0;
-
-		bzero(&lun->PhysDev.Target, sizeof (lun->PhysDev.Target));
+		cpqary3_write_lun_addr_phys(&cpcm->cpcm_va_cmd->Header.LUN,
+		    B_TRUE, 0, 0);
 	} else {
 		/*
 		 * Copy logical volume address from the target object:
@@ -353,25 +364,15 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 	pkt->pkt_state = 0;
 
 	/*
-	 * XXX Synchronise DMA for device to see changes to the command
-	 * block...? XXX this is being done in cpqary3_submit() now ...
+	 * If this SCSI packet has a timeout, configure an appropriate
+	 * expiry time:
 	 */
-#if 0
-	if (ddi_dma_sync(cpcm->cpcm_phyctg->cpqary3_dmahandle, 0,
-	    sizeof (CommandList_t), DDI_DMA_SYNC_FORDEV) != DDI_SUCCESS) {
-		dev_err(cpq->cpq, CE_WARN, "DMA sync failure");
-		return (TRAN_FATAL_ERROR);
+	if (pkt->pkt_time != 0) {
+		cpcm->cpcm_expiry = gethrtime() + pkt->pkt_time * NANOSEC;
 	}
-#endif
 
 	/*
-	 * XXX I don't _think_ we need to synchronise the DMA stuff we
-	 * were _passed_ (in the SCSI packet).  Need to make sure, though.
-	 * I think the documentation could be clearer about this...
-	 */
-
-	/*
-	 * Submit the command to the controller!
+	 * Submit the command to the controller.
 	 */
 	mutex_enter(&cpq->cpq_mutex);
 	if ((r = cpqary3_submit(cpq, cpcm)) != 0) {
@@ -407,75 +408,109 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 	return (TRAN_ACCEPT);
 }
 
-
-#if 0
-static struct scsi_pkt *
-cpqary3_tran_init_pkt(struct scsi_address *sa, struct scsi_pkt *pkt,
-    struct buf *bp, int cmdlen, int statuslen, int tgtlen,
-    int flags, int (*callback)(), caddr_t arg)
-{
-	cpqary3_t *cpq = (cpqary3_t *)sa->a_hba_tran->tran_hba_private;
-	cpqary3_target_t *cptg = (cpqary3_target_t *)sa->a_hba_tran->
-	    tran_tgt_private;
-	boolean_t allocated_packet = B_FALSE;
-	cpqary3_command_scsa_t *cpcms;
-
-	if (pkt == NULL) {
-		/*
-		 * The framework requires we allocate a new packet
-		 * structure via scsi_hba_pkt_alloc(9F).
-		 */
-		if ((pkt = scsi_hba_pkt_alloc(cpq->dip, sa, cmdlen, statuslen,
-		    tgtlen, sizeof (*cpcms), callback, arg)) == NULL) {
-			return (NULL);
-		}
-		allocated_packet = B_TRUE;
-	}
-	cpcms = (cpqary3_command_scsa_t *)pkt->pkt_ha_private;
-
-	if (allocated_packet) {
-		/*
-		 * Our private SCSI packet object was just allocated by
-		 * scsi_hba_pkt_alloc(9F).  Initialise it:
-		 */
-		cpcms->cpcms_pkt = pkt;
-	}
-
-	if (bp != NULL && allocated_packet) {
-		/*
-		 * This is a new packet with an associated buffer.  The
-		 * framework requires us to allocate appropriate DMA
-		 * resources.
-		 */
-		if (cpqary3_dma_alloc(cpq, pkt, bp, flags, callback) !=
-		    DDI_SUCCESS) {
-			scsi_hba_pkt_free(sa, scsi_pktp);
-			return (NULL);
-		}
-	} else if (bp != NULL && !allocated_packet &&
-	    (flags & PKT_DMA_PARTIAL) != 0) {
-		/*
-		 * This is not a new packet, but a buffer was passed in and we
-		 * had previously allocated DMA resources.  This is a request
-		 * from the framework to move the DMA resources.
-		 */
-		if (cpqary3_dma_move(scsi_pktp, bp, cpq) != DDI_SUCCESS) {
-			return (NULL);
-		}
-	}
-
-	return (scsi_pktp);
-}
-#endif
-
 static int
 cpqary3_tran_reset(struct scsi_address *sa, int level)
 {
+	scsi_hba_tran_t *tran = sa->a_hba_tran;
+	cpqary3_t *cpq = (cpqary3_t *)tran->tran_hba_private;
+	int r;
+	cpqary3_command_t *cpcm;
+
 	/*
-	 * We currently have no earthly idea how to reset the controller.
-	 * Signal our universal, abject failure to the SCSI framework.
+	 * The framework has requested some kind of SCSI reset.  A
+	 * controller-level soft reset can take a very long time -- often on
+	 * the order of 30-60 seconds -- but might well be our only option if
+	 * the controller is non-responsive.
+	 *
+	 * First, check if the controller is responding to pings.
 	 */
-	return (0);
+again:
+	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_INTERNAL,
+	    KM_NOSLEEP)) == NULL) {
+		return (0);
+	}
+
+	cpqary3_write_message_nop(cpcm, 15);
+
+	mutex_enter(&cpq->cpq_mutex);
+	if (ddi_in_panic()) {
+		goto skip_check;
+	}
+
+	if (cpq->cpq_status & CPQARY3_CTLR_STATUS_RESETTING) {
+		/*
+		 * The controller is already resetting.  Wait for that
+		 * to finish.
+		 */
+		while (cpq->cpq_status & CPQARY3_CTLR_STATUS_RESETTING) {
+			cv_wait(&cpq->cpq_cv_finishq, &cpq->cpq_mutex);
+		}
+	}
+
+skip_check:
+	/*
+	 * Submit our ping to the controller.
+	 */
+	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_POLLED;
+	cpcm->cpcm_expiry = gethrtime() + 15 * NANOSEC;
+	if (cpqary3_submit(cpq, cpcm) != 0) {
+		mutex_exit(&cpq->cpq_mutex);
+		cpqary3_command_free(cpcm);
+		return (0);
+	}
+
+	if ((r = cpqary3_poll_for(cpq, cpcm)) == 0 &&
+	    !(cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR) &&
+	    !(cpcm->cpcm_status & CPQARY3_CMD_STATUS_RESET_SENT)) {
+		/*
+		 * The controller is responsive, and a full soft reset would be
+		 * extremely disruptive to the system.  Given our spotty
+		 * support for some SCSI commands (which can upset the target
+		 * drivers) and the historically lax behaviour of the "cpqary3"
+		 * driver, we grit our teeth and pretend we were able to
+		 * perform a reset.
+		 */
+		mutex_exit(&cpq->cpq_mutex);
+		cpqary3_command_free(cpcm);
+		return (1);
+	}
+
+	if (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLL_COMPLETE)) {
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ABANDONED;
+	} else {
+		mutex_exit(&cpq->cpq_mutex);
+		cpqary3_command_free(cpcm);
+		mutex_enter(&cpq->cpq_mutex);
+	}
+
+	/*
+	 * If a reset has been initiated in the last 90 seconds, try
+	 * another ping.
+	 */
+	if (gethrtime() < cpq->cpq_last_reset_start + 90 * NANOSEC) {
+		dev_err(cpq->dip, CE_WARN, "controller ping failed, but was "
+		    "recently reset; retrying ping");
+		mutex_exit(&cpq->cpq_mutex);
+
+		/*
+		 * Sleep for a second first.
+		 */
+		if (ddi_in_panic()) {
+			drv_usecwait(1 * MICROSEC);
+		} else {
+			delay(drv_usectohz(1 * MICROSEC));
+		}
+		goto again;
+	}
+
+	dev_err(cpq->dip, CE_WARN, "controller ping failed; "
+	    "resetting controller");
+	if (cpqary3_ctlr_reset(cpq) != 0) {
+		dev_err(cpq->dip, CE_WARN, "controller reset failure");
+		return (0);
+	}
+
+	return (1);
 }
 
 static int
@@ -483,31 +518,128 @@ cpqary3_tran_abort(struct scsi_address *sa, struct scsi_pkt *pkt)
 {
 	scsi_hba_tran_t *tran = sa->a_hba_tran;
 	cpqary3_t *cpq = (cpqary3_t *)tran->tran_hba_private;
-	cpqary3_target_t *cptg = (cpqary3_target_t *)tran->tran_tgt_private;
 	cpqary3_command_t *cpcm = NULL;
-	int r;
+	cpqary3_command_t *abort_cpcm;
 
-	if (pkt != NULL) {
-		cpqary3_command_scsa_t *cpcms = (cpqary3_command_scsa_t *)
-		    pkt->pkt_ha_private;
-		cpcm = cpcms->cpcms_command;
+	if ((abort_cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_INTERNAL,
+	    KM_NOSLEEP)) == NULL) {
+		/*
+		 * No resources available to send an abort message.
+		 */
+		return (0);
 	}
 
 	mutex_enter(&cpq->cpq_mutex);
-	/*
-	 * XXX
-	 */
-	r = cpqary3_send_abortcmd(cpq, cptg, cpcm);
-	mutex_exit(&cpq->cpq_mutex);
+	if (pkt != NULL) {
+		/*
+		 * The framework wants us to abort a specific SCSI packet.
+		 */
+		cpqary3_command_scsa_t *cpcms = (cpqary3_command_scsa_t *)
+		    pkt->pkt_ha_private;
+		cpcm = cpcms->cpcms_command;
 
-	return (r == 0 ? 1 : 0);
+		if (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT)) {
+			/*
+			 * This message is not currently inflight, so we
+			 * cannot abort it.
+			 */
+			goto fail;
+		}
+
+		if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_ABORT_SENT) {
+			/*
+			 * An abort message for this command has already been
+			 * sent to the controller.  Return failure.
+			 */
+			goto fail;
+		}
+
+		cpqary3_write_message_abort_one(abort_cpcm, cpcm->cpcm_tag);
+	} else {
+		/*
+		 * The framework wants us to abort every inflight command
+		 * for the target with this address.
+		 */
+		cpqary3_target_t *cptg = (cpqary3_target_t *)tran->
+		    tran_tgt_private;
+
+		if (cptg->cptg_volume == NULL) {
+			/*
+			 * We currently do not support sending an abort
+			 * to anything but a Logical Volume.
+			 */
+			goto fail;
+		}
+
+		cpqary3_write_message_abort_all(abort_cpcm,
+		    &cptg->cptg_volume->cplv_addr);
+	}
+
+	/*
+	 * Submit the abort message to the controller.
+	 */
+	abort_cpcm->cpcm_status |= CPQARY3_CMD_STATUS_POLLED;
+	if (cpqary3_submit(cpq, abort_cpcm) != 0) {
+		goto fail;
+	}
+
+	if (pkt != NULL) {
+		/*
+		 * Record some debugging information about the abort we
+		 * sent:
+		 */
+		cpcm->cpcm_abort_time = gethrtime();
+		cpcm->cpcm_abort_tag = abort_cpcm->cpcm_tag;
+
+		/*
+		 * Mark the command as aborted so that we do not send
+		 * a second abort message:
+		 */
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ABORT_SENT;
+	}
+
+	/*
+	 * Poll for completion of the abort message.  Note that this function
+	 * only fails if we set a timeout on the command, which we have not
+	 * done.
+	 */
+	VERIFY0(cpqary3_poll_for(cpq, abort_cpcm));
+
+	if ((abort_cpcm->cpcm_status & CPQARY3_CMD_STATUS_RESET_SENT) ||
+	    (abort_cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR)) {
+		/*
+		 * Either the controller was reset or the abort command
+		 * failed.
+		 */
+		goto fail;
+	}
+
+	/*
+	 * The command was successfully aborted.
+	 */
+	mutex_exit(&cpq->cpq_mutex);
+	cpqary3_command_free(abort_cpcm);
+	return (1);
+
+fail:
+	mutex_exit(&cpq->cpq_mutex);
+	cpqary3_command_free(abort_cpcm);
+	return (0);
 }
 
-void
+int
 cpqary3_hba_setup(cpqary3_t *cpq)
 {
-	scsi_hba_tran_t *tran = cpq->cpq_hba_tran;
+	scsi_hba_tran_t *tran;
 
+	if ((tran = scsi_hba_tran_alloc(cpq->dip, SCSI_HBA_CANSLEEP)) ==
+	    NULL) {
+		dev_err(cpq->dip, CE_WARN, "could not allocate SCSA "
+		    "resources");
+		return (DDI_FAILURE);
+	}
+
+	cpq->cpq_hba_tran = tran;
 	tran->tran_hba_private = cpq;
 
 	tran->tran_tgt_init = cpqary3_tran_tgt_init;
@@ -524,26 +656,34 @@ cpqary3_hba_setup(cpqary3_t *cpq)
 	tran->tran_getcap = cpqary3_getcap;
 	tran->tran_setcap = cpqary3_setcap;
 
-#if 0
-	/*
-	 * XXX Old style:
-	 */
-	tran->tran_init_pkt = XXX;
-	tran->tran_destroy_pkt = XXX;
-	tran->tran_dmafree = XXX;
-	tran->tran_sync_pkt = XXX;
-#else
-	/*
-	 * XXX New style:
-	 */
 	tran->tran_setup_pkt = cpqary3_tran_setup_pkt;
 	tran->tran_teardown_pkt = cpqary3_tran_teardown_pkt;
 	tran->tran_hba_len = sizeof (cpqary3_command_scsa_t);
-#endif
 
 	/*
 	 * XXX We should set "tran_interconnect_type" appropriately.
 	 * e.g. to INTERCONNECT_SAS for SAS controllers.  How to tell?
 	 * Who knows.
 	 */
+
+	if (scsi_hba_attach_setup(cpq->dip, &cpq->cpq_dma_attr, tran,
+	    SCSI_HBA_TRAN_CLONE) != DDI_SUCCESS) {
+		dev_err(cpq->dip, CE_WARN, "could not attach to SCSA "
+		    "framework");
+		scsi_hba_tran_free(tran);
+		return (DDI_FAILURE);
+	}
+
+	cpq->cpq_init_level |= CPQARY3_INITLEVEL_SCSA;
+	return (DDI_SUCCESS);
+}
+
+void
+cpqary3_hba_teardown(cpqary3_t *cpq)
+{
+	if (cpq->cpq_init_level & CPQARY3_INITLEVEL_SCSA) {
+		VERIFY(scsi_hba_detach(cpq->dip) != DDI_FAILURE);
+		scsi_hba_tran_free(cpq->cpq_hba_tran);
+		cpq->cpq_init_level &= ~CPQARY3_INITLEVEL_SCSA;
+	}
 }

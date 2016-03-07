@@ -22,6 +22,14 @@ cpqary3_isr_hw_simple(caddr_t arg1, caddr_t arg2)
 	uint32_t isr = cpqary3_get32(cpq, CISS_I2O_INTERRUPT_STATUS);
 
 	mutex_enter(&cpq->cpq_mutex);
+	if (!(cpq->cpq_status & CPQARY3_CTLR_STATUS_RUNNING)) {
+		/*
+		 * We should not be receiving interrupts from the controller
+		 * while the driver is not running.
+		 */
+		mutex_exit(&cpq->cpq_mutex);
+		return (DDI_INTR_UNCLAIMED);
+	}
 
 	/*
 	 * Check to see if this interrupt came from the device:
@@ -78,6 +86,7 @@ cpqary3_retrieve_simple(cpqary3_t *cpq)
 		if (CISS_OPQ_READ_ERROR(opq) != 0) {
 			cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ERROR;
 		}
+		cpcm->cpcm_time_complete = gethrtime();
 
 		/*
 		 * Push this command onto the completion queue.
@@ -119,9 +128,21 @@ cpqary3_ctlr_init_simple(cpqary3_t *cpq)
 	}
 
 	/*
-	 * XXX ?
+	 * Determine the number of Scatter/Gather List entries this controller
+	 * supports.  The maximum number we allow is CISS_MAXSGENTRIES: the
+	 * number of elements in the static struct we use for command
+	 * submission.
 	 */
-	cpq->cpq_sg_cnt = CPQARY3_SG_CNT;
+	if ((cpq->cpq_sg_cnt = cpqary3_ctlr_get_maxsgelements(cpq)) == 0) {
+		/*
+		 * The CISS specification states that if this value is
+		 * zero, we should assume a value of 31 for compatibility
+		 * with older firmware.
+		 */
+		cpq->cpq_sg_cnt = 31;
+	} else if (cpq->cpq_sg_cnt > CISS_MAXSGENTRIES) {
+		cpq->cpq_sg_cnt = CISS_MAXSGENTRIES;
+	}
 
 	/*
 	 * Zero the upper 32 bits of the address in the Controller.
@@ -155,4 +176,17 @@ cpqary3_ctlr_init_simple(cpqary3_t *cpq)
 	}
 
 	return (DDI_SUCCESS);
+}
+
+void
+cpqary3_ctlr_teardown_simple(cpqary3_t *cpq)
+{
+	VERIFY(cpq->cpq_ctlr_mode == CPQARY3_CTLR_MODE_SIMPLE);
+
+	/*
+	 * Due to the nominal simplicity of the simple mode, we have no
+	 * particular teardown to perform as we do not allocate anything
+	 * on the way up.
+	 */
+	cpq->cpq_ctlr_mode = CPQARY3_CTLR_MODE_UNKNOWN;
 }

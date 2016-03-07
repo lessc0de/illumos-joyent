@@ -42,19 +42,6 @@ cpqary3_lookup_volume_by_addr(cpqary3_t *cpq, struct scsi_address *sa)
 	return (cpqary3_lookup_volume_by_id(cpq, sa->a_target));
 }
 
-static void
-cpqary3_write_lun_addr_phys(LUNAddr_t *lun, boolean_t masked, unsigned bus,
-    unsigned target)
-{
-	lun->PhysDev.Mode = masked ? MASK_PERIPHERIAL_DEV_ADDR :
-	    PERIPHERIAL_DEV_ADDR;
-
-	lun->PhysDev.TargetId = target;
-	lun->PhysDev.Bus = bus;
-
-	bzero(&lun->PhysDev.Target, sizeof (lun->PhysDev.Target));
-}
-
 static int
 cpqary3_read_logvols(cpqary3_t *cpq, cpqary3_report_logical_lun_t *cprll)
 {
@@ -182,33 +169,60 @@ cpqary3_discover_logical_volumes(cpqary3_t *cpq, int timeout)
 {
 	cpqary3_command_t *cpcm;
 	cpqary3_report_logical_lun_t *cprll;
-	CommandList_t *cl;
 	cpqary3_report_logical_lun_req_t cprllr = { 0 };
 	int r;
+
+	if (!ddi_in_panic()) {
+		mutex_enter(&cpq->cpq_mutex);
+		while (cpq->cpq_status & CPQARY3_CTLR_STATUS_DISCOVERY) {
+			/*
+			 * A discovery is already occuring.  Wait for
+			 * completion.
+			 */
+			cv_wait(&cpq->cpq_cv_finishq, &cpq->cpq_mutex);
+		}
+
+		if (gethrtime() < cpq->cpq_last_discovery + 5 * NANOSEC) {
+			/*
+			 * A discovery completed successfully within the
+			 * last five seconds.  Just use the existing data.
+			 */
+			mutex_exit(&cpq->cpq_mutex);
+			return (0);
+		}
+
+		cpq->cpq_status |= CPQARY3_CTLR_STATUS_DISCOVERY;
+		mutex_exit(&cpq->cpq_mutex);
+	}
 
 	/*
 	 * Allocate the command to send to the device, including buffer space
 	 * for the returned list of Logical Volumes.
 	 */
-	if ((cpcm = cpqary3_synccmd_alloc(cpq,
-	    sizeof (cpqary3_report_logical_lun_t), KM_NOSLEEP)) == NULL) {
-		return (ENOMEM);
+	if ((cpcm = cpqary3_command_alloc(cpq, CPQARY3_CMDTYPE_INTERNAL,
+	    KM_NOSLEEP)) == NULL ||
+	    cpqary3_command_attach_internal(cpq, cpcm,
+	    sizeof (cpqary3_report_logical_lun_t), KM_NOSLEEP) != 0) {
+		r = ENOMEM;
+		mutex_enter(&cpq->cpq_mutex);
+		goto out;
 	}
+
 	cprll = cpcm->cpcm_internal->cpcmi_va;
-	cl = cpcm->cpcm_va_cmd;
 
 	/*
 	 * According to the CISS Specification, the Report Logical LUNs
 	 * command is sent to the controller itself.  The Masked Peripheral
 	 * Device addressing mode is used, with LUN of 0.
 	 */
-	cpqary3_write_lun_addr_phys(&cl->Header.LUN, B_TRUE, 0, 0);
+	cpqary3_write_lun_addr_phys(&cpcm->cpcm_va_cmd->Header.LUN, B_TRUE,
+	    0, 0);
 
-	cl->Request.CDBLen = 12;
-	cl->Request.Timeout = 0;
-	cl->Request.Type.Type = CISS_TYPE_CMD;
-	cl->Request.Type.Attribute = CISS_ATTR_ORDERED;
-	cl->Request.Type.Direction = CISS_XFER_READ;
+	cpcm->cpcm_va_cmd->Request.CDBLen = 12;
+	cpcm->cpcm_va_cmd->Request.Timeout = timeout;
+	cpcm->cpcm_va_cmd->Request.Type.Type = CISS_TYPE_CMD;
+	cpcm->cpcm_va_cmd->Request.Type.Attribute = CISS_ATTR_ORDERED;
+	cpcm->cpcm_va_cmd->Request.Type.Direction = CISS_XFER_READ;
 
 	/*
 	 * The Report Logical LUNs command is essentially a vendor-specific
@@ -218,36 +232,79 @@ cpqary3_discover_logical_volumes(cpqary3_t *cpq, int timeout)
 	cprllr.cprllr_opcode = CISS_SCMD_REPORT_LOGICAL_LUNS;
 	cprllr.cprllr_extflag = 1;
 	cprllr.cprllr_datasize = htonl(sizeof (cpqary3_report_logical_lun_t));
-	bcopy(&cprllr, cl->Request.CDB, 16);
+	bcopy(&cprllr, &cpcm->cpcm_va_cmd->Request.CDB[0], 16);
 
-	if (cpqary3_synccmd_send(cpq, cpcm, timeout * 1000,
-	    CPQARY3_SYNCCMD_SEND_WAITSIG) != 0) {
-		cpqary3_synccmd_free(cpq, cpcm);
-		return (EIO);
+	mutex_enter(&cpq->cpq_mutex);
+
+	/*
+	 * Send the command to the device.
+	 */
+	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_POLLED;
+	if (cpqary3_submit(cpq, cpcm) != 0) {
+		r = EIO;
+		goto out;
+	}
+
+	/*
+	 * Poll for completion.
+	 */
+	cpcm->cpcm_expiry = gethrtime() + timeout * NANOSEC;
+	if ((r = cpqary3_poll_for(cpq, cpcm)) != 0) {
+		VERIFY(r == ETIMEDOUT);
+		VERIFY0(cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLL_COMPLETE);
+
+		/*
+		 * The command timed out; abandon it now.  Remove the POLLED
+		 * flag so that the periodic routine will send an abort to
+		 * clean it up next time around.
+		 */
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ABANDONED;
+		cpcm->cpcm_status &= ~CPQARY3_CMD_STATUS_POLLED;
+		cpcm = NULL;
+		goto out;
+	}
+
+	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_RESET_SENT) {
+		/*
+		 * The controller was reset while we were trying to discover
+		 * logical volumes.  Report failure.
+		 */
+		r = EIO;
+		goto out;
 	}
 
 	if (cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR) {
 		ErrorInfo_t *ei = cpcm->cpcm_va_err;
 
-		dev_err(cpq->dip, CE_WARN, "RLL ERROR: %x", ei->CommandStatus);
 		if (ei->CommandStatus != CISS_CMD_DATA_UNDERRUN) {
-			/*
-			 * XXX This is fatal, then...
-			 */
-			cpqary3_synccmd_free(cpq, cpcm);
-			return (EIO);
+			dev_err(cpq->dip, CE_WARN, "logical volume discovery"
+			    "error: status 0x%x", ei->CommandStatus);
+			r = EIO;
+			goto out;
 		}
 	}
 
-	mutex_enter(&cpq->cpq_mutex);
 	if ((cprll->cprll_extflag & 0x1) != 0) {
 		r = cpqary3_read_logvols_ext(cpq, cprll);
 	} else {
 		r = cpqary3_read_logvols(cpq, cprll);
 	}
+
+	if (r == 0) {
+		/*
+		 * Update the time of the last successful Logical Volume
+		 * discovery:
+		 */
+		cpq->cpq_last_discovery = gethrtime();
+	}
+
+out:
+	cpq->cpq_status &= ~CPQARY3_CTLR_STATUS_DISCOVERY;
+	cv_broadcast(&cpq->cpq_cv_finishq);
 	mutex_exit(&cpq->cpq_mutex);
 
-	cpqary3_synccmd_free(cpq, cpcm);
-
+	if (cpcm != NULL) {
+		cpqary3_command_free(cpcm);
+	}
 	return (r);
 }

@@ -35,23 +35,12 @@
 
 #include <cpqary3_ciss.h>
 #include <cpqary3_bd.h>
+#include <cpqary3_ioctl.h>
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
-/*
- *	Ioctl Commands
- */
-#define	CPQARY3_IOCTL_CMD		('c' << 4)
-#define	CPQARY3_IOCTL_BMIC_PASS		CPQARY3_IOCTL_CMD | 0x04
-#define	CPQARY3_IOCTL_SCSI_PASS		CPQARY3_IOCTL_CMD | 0x08
-
-/* Some Useful definations */
-#define	CPQARY3_FAILURE		0
-#define	CPQARY3_SUCCESS		1
-
-#define	CTLR_SCSI_ID		7
 #define	CPQARY3_LD_FAILED	1
 
 typedef enum cpqary3_init_level {
@@ -62,24 +51,23 @@ typedef enum cpqary3_init_level {
 	CPQARY3_INITLEVEL_INT_ALLOC =		(0x1 << 4),
 	CPQARY3_INITLEVEL_INT_ADDED =		(0x1 << 5),
 	CPQARY3_INITLEVEL_INT_ENABLED =		(0x1 << 6),
-	CPQARY3_INITLEVEL_HBA_ALLOC =		(0x1 << 7),
-	CPQARY3_INITLEVEL_HBA_ATTACH =		(0x1 << 8),
+	CPQARY3_INITLEVEL_SCSA =		(0x1 << 7),
 } cpqary3_init_level_t;
 
 /*
- * Commands issued to the controller carry a (generally 32-bit, though with two
- * reserved signalling bits) identifying tag number.  In order to avoid having
- * the controller confuse us by double-reporting the completion of a particular
- * tag, we try to reuse them as infrequently as possible.  In practice, this
- * means looping through a range of values.  The minimum and maximum value are
- * defined below.
+ * Commands issued to the controller carry a (generally 32-bit, though with
+ * two reserved signalling bits) identifying tag number.  In order to avoid
+ * having the controller confuse us by double-reporting the completion of a
+ * particular tag, we try to reuse them as infrequently as possible.  In
+ * practice, this means looping through a range of values.  The minimum and
+ * maximum value are defined below.
  */
 #define	CPQARY3_MIN_TAG_NUMBER		0x00000100
 #define	CPQARY3_MAX_TAG_NUMBER		0x0fffffff
 
 /*
  * Definitions to support waiting for the controller to converge on a
- * particular state; ready or not ready.  These are used with
+ * particular state: ready or not ready.  These are used with
  * cpqary3_ctlr_wait_for_state().
  */
 #define	CPQARY3_WAIT_DELAY_SECONDS	120
@@ -98,7 +86,13 @@ typedef enum cpqary3_ctlr_mode {
  */
 #define	MAX_LOGDRV		64	/* Max supported Logical Drivers */
 #define	MAX_CTLRS		8	/* Max supported Controllers */
-#define	MAX_TAPE		28
+
+/*
+ * In addition to Logical Volumes, we also expose the controller at a
+ * pseudo target address on the SCSI bus we are essentially pretending to be.
+ */
+#define	CPQARY3_CONTROLLER_TARGET		128
+
 /*
  * NOTE: When changing the below two entries, Max SG count in cpqary3_ciss.h
  * should also be changed.
@@ -157,31 +151,12 @@ typedef enum cpqary3_ctlr_mode {
 #define	CPQARY3_SWAP(val)   		((val >> 8) | ((val & 0xff) << 8))
 #define	CPQARY3_SEC2HZ(x)		drv_usectohz((x) * 1000000)
 
-/*
- * Convenient macros for reading/writing Configuration table registers
- */
-#define	DDI_GET8(ctlr, regp)	 		\
-	ddi_get8((ctlr)->ct_handle, (uint8_t *)(regp))
-#define	DDI_PUT8(ctlr, regp, value)		\
-	ddi_put8((ctlr)->ct_handle, (uint8_t *)(regp), (value))
-#define	DDI_GET16(ctlr, regp)	 		\
-	ddi_get16((ctlr)->ct_handle, (uint16_t *)(regp))
-#define	DDI_PUT16(ctlr, regp, value)	\
-	ddi_put16((ctlr)->ct_handle, (uint16_t *)(regp), (value))
-#define	DDI_GET32(ctlr, regp)	 		\
-	ddi_get32((ctlr)->ct_handle, (uint32_t *)(regp))
-#define	DDI_PUT32(ctlr, regp, value) 	\
-	ddi_put32((ctlr)->ct_handle, (uint32_t *)(regp), (value))
-#define	DDI_PUT32_CP(ctlr, regp, value)   \
-	ddi_put32((ctlr)->cp_handle, (uint32_t *)(regp), (value))
-
 #define	CPQARY3_BUFFER_ERROR_CLEAR	0x0	/* to be used with bioerror */
 #define	CPQARY3_DMA_NO_CALLBACK		0x0	/* to be used with DMA calls */
 #define	CPQARY3_DMA_ALLOC_HANDLE_DONE	0x01
 #define	CPQARY3_DMA_ALLOC_MEM_DONE	0x02
 #define	CPQARY3_DMA_BIND_ADDR_DONE	0x04
 #define	CPQARY3_FREE_PHYCTG_MEM		0x07
-#define	CPQARY3_SYNCCMD_SEND_WAITSIG	(0x0001)
 
 /*
  * Include the driver specific relevant header files here.
@@ -262,6 +237,30 @@ struct cpqary3_target {
 #define	INTR_SIMPLE_5I_MASK		0x00000004l
 #define	INTR_SIMPLE_5I_LOCKUP_MASK	0x0000000cl
 
+typedef enum cpqary3_controller_status {
+	/*
+	 * A Logical Volume discovery is currently occuring.
+	 */
+	CPQARY3_CTLR_STATUS_DISCOVERY =		(0x1 << 0),
+
+	/*
+	 * An attempt is being made to detach the controller instance.
+	 */
+	CPQARY3_CTLR_STATUS_DETACHING =		(0x1 << 1),
+
+	/*
+	 * The controller is believed to be functioning correctly.  The driver
+	 * is to allow command submission, process interrupts, and perform
+	 * periodic background maintenance.
+	 */
+	CPQARY3_CTLR_STATUS_RUNNING =		(0x1 << 2),
+
+	/*
+	 * The controller is currently being reset.
+	 */
+	CPQARY3_CTLR_STATUS_RESETTING =		(0x1 << 3),
+} cpqary3_controller_status_t;
+
 /*
  * Per Controller Structure
  */
@@ -269,6 +268,7 @@ typedef struct cpqary3 cpqary3_t;
 struct cpqary3 {
 	dev_info_t		*dip;
 	int			cpq_instance;
+	cpqary3_controller_status_t cpq_status;
 
 	/*
 	 * Controller model-specific data.
@@ -311,7 +311,11 @@ struct cpqary3 {
 	 * Controller Heartbeat Tracking
 	 */
 	uint32_t		cpq_last_heartbeat;
-	clock_t			cpq_last_heartbeat_lbolt;
+	hrtime_t		cpq_last_heartbeat_time;
+
+	hrtime_t		cpq_last_discovery;
+	hrtime_t		cpq_last_reset_start;
+	hrtime_t		cpq_last_reset_finish;
 
 	/*
 	 * Command object tracking.  These lists, and all commands within the
@@ -321,6 +325,7 @@ struct cpqary3 {
 	avl_tree_t		cpq_inflight;
 	list_t			cpq_commands;	/* List of all commands. */
 	list_t			cpq_finishq;	/* List of completed commands. */
+	list_t			cpq_abortq;	/* List of commands to abort. */
 
 	/*
 	 * Controller interrupt handler registration.
@@ -331,6 +336,8 @@ struct cpqary3 {
 	ddi_periodic_t		cpq_periodic;
 
 	scsi_hba_tran_t		*cpq_hba_tran;
+
+	ddi_dma_attr_t		cpq_dma_attr;
 
 	/*
 	 * Access to the I2O Registers:
@@ -396,47 +403,118 @@ typedef struct cpqary3_command_scsa cpqary3_command_scsa_t;
 typedef struct cpqary3_pkt cpqary3_pkt_t;
 
 typedef enum cpqary3_command_status {
+	/*
+	 * When a command is submitted to the controller, it is marked USED
+	 * to avoid accidental reuse of the command without reinitialising
+	 * critical fields.  The submitted command is also marked INFLIGHT
+	 * to reflect its inclusion in the "cpq_inflight" AVL tree.  When
+	 * the command is completed by the controller, INFLIGHT is unset.
+	 */
 	CPQARY3_CMD_STATUS_USED =		(0x1 << 0),
 	CPQARY3_CMD_STATUS_INFLIGHT =		(0x1 << 1),
+
 	CPQARY3_CMD_STATUS_TIMEOUT =		(0x1 << 2),
 	CPQARY3_CMD_STATUS_ERROR =		(0x1 << 3),
+
+	/*
+	 * This command has been abandoned by the original submitter.  This
+	 * could happen if the command did not complete in a timely fashion.
+	 * When it reaches the finish queue it will be freed without further
+	 * processing.
+	 */
 	CPQARY3_CMD_STATUS_ABANDONED =		(0x1 << 4),
+
+	/*
+	 * This command has made it through the completion queue and had final
+	 * processing performed.
+	 */
 	CPQARY3_CMD_STATUS_COMPLETE =		(0x1 << 5),
+
+	/*
+	 * A polled message will be ignored by the regular processing of the
+	 * completion queue.  The blocking function doing the polling is
+	 * responsible for watching the command on which it has set the POLLED
+	 * flag.  Regular completion queue processing (which might happen in
+	 * the polling function, or it might happen in the interrupt handler)
+	 * will set POLL_COMPLETE once it is out of the finish queue
+	 * altogether.
+	 */
 	CPQARY3_CMD_STATUS_POLLED =		(0x1 << 6),
 	CPQARY3_CMD_STATUS_POLL_COMPLETE =	(0x1 << 7),
+
+	/*
+	 * An abort message has been sent to the controller in an attempt to
+	 * cancel this command.
+	 */
 	CPQARY3_CMD_STATUS_ABORT_SENT =		(0x1 << 8),
+
+	/*
+	 * This command has been passed to our tran_start(9E) handler.
+	 */
 	CPQARY3_CMD_STATUS_TRAN_START =		(0x1 << 9),
+
+	/*
+	 * This command was for a SCSI command that we are explicitly avoiding
+	 * sending to the controller.
+	 */
 	CPQARY3_CMD_STATUS_TRAN_IGNORED =	(0x1 << 10),
+
+	/*
+	 * This command has been submitted once, and subsequently passed to
+	 * cpqary3_command_reuse().
+	 */
 	CPQARY3_CMD_STATUS_REUSED =		(0x1 << 11),
+
+	/*
+	 * A controller reset has been issued, so a response for this command
+	 * is not expected.  If one arrives before the controller reset has
+	 * taken effect, it likely cannot be trusted.
+	 */
+	CPQARY3_CMD_STATUS_RESET_SENT =		(0x1 << 12),
 } cpqary3_command_status_t;
 
 typedef enum cpqary3_command_type {
-	CPQARY3_CMDTYPE_NONE = 0,
-	CPQARY3_CMDTYPE_OS,
-	CPQARY3_CMDTYPE_SYNCCMD,
+	CPQARY3_CMDTYPE_INTERNAL = 1,
+	CPQARY3_CMDTYPE_ABORTQ,
+	CPQARY3_CMDTYPE_SCSA,
 } cpqary3_command_type_t;
 
 struct cpqary3_command {
 	uint32_t cpcm_tag;
 	cpqary3_command_type_t cpcm_type;
+	cpqary3_command_status_t cpcm_status;
 
 	cpqary3_t *cpcm_ctlr;
 	cpqary3_target_t *cpcm_target;
 
 	list_node_t cpcm_link;		/* Linkage for allocated list. */
 	list_node_t cpcm_link_finish;	/* Linkage for completion list. */
+	list_node_t cpcm_link_abort;	/* Linkage for abort list. */
 	avl_node_t cpcm_node;		/* Inflight AVL membership. */
 
-	clock_t cpcm_time_submit;
-	clock_t cpcm_time_abort;
+	hrtime_t cpcm_time_submit;
+	hrtime_t cpcm_time_complete;
 
-	cpqary3_command_status_t cpcm_status;
+	hrtime_t cpcm_expiry;
 
+	/*
+	 * The time at which an abort message was sent to try and terminate
+	 * this command, as well as the tag of the abort message itself:
+	 */
+	hrtime_t cpcm_abort_time;
+	uint32_t cpcm_abort_tag;
+
+	/*
+	 * Ancillary data objects.  Only one of these will be allocated for any
+	 * given command, but we nonetheless resist the temptation to use a
+	 * union of pointers in order to make incorrect usage obvious.
+	 */
 	cpqary3_command_scsa_t *cpcm_scsa;
 	cpqary3_command_internal_t *cpcm_internal;
 
 	/*
-	 * Physical allocation tracking:
+	 * Physical allocation tracking for the actual command to send to the
+	 * controller.
 	 */
 	cpqary3_phyctg_t cpcm_phyctg;
 
@@ -471,38 +549,6 @@ struct cpqary3_command_scsa {
 };
 
 
-#if 0
-/* cmd_flags */
-#define	CFLAG_DMASEND	0x01
-#define	CFLAG_CMDIOPB	0x02
-#define	CFLAG_DMAVALID	0x04
-
-/*
- * Driver Private Packet
- */
-struct cpqary3_pkt {
-	struct scsi_pkt		*scsi_cmd_pkt;
-	ddi_dma_win_t		prev_winp;
-	ddi_dma_seg_t		prev_segp;
-	ddi_dma_cookie_t	cmd_dmacookies[MAX_PERF_SG_CNT];
-	uint32_t		cmd_ncookies;
-	uint32_t		cmd_cookie;
-	uint32_t		cmd_cookiecnt;
-	uint32_t		cmd_nwin;
-	uint32_t		cmd_curwin;
-	off_t			cmd_dma_offset;
-	size_t			cmd_dma_len;
-	size_t			cmd_dmacount;
-	struct buf		*bf;
-	ddi_dma_handle_t   	cmd_dmahandle;
-	uint32_t		bytes;
-	uint32_t		cmd_flags;
-	uint32_t		cdb_len;
-	uint32_t		scb_len;
-	cpqary3_command_t	*cmd_command;
-};
-#endif
-
 /* Driver function definitions */
 
 void cpqary3_periodic(void *);
@@ -523,7 +569,7 @@ void cpqary3_build_cmdlist(cpqary3_command_t *cpqary3_cmdpvtp,
 void cpqary3_lockup_check(cpqary3_t *);
 void cpqary3_oscmd_complete(cpqary3_command_t *);
 
-void cpqary3_poll_for(cpqary3_t *, cpqary3_command_t *);
+int cpqary3_poll_for(cpqary3_t *, cpqary3_command_t *);
 
 /*
  * Memory management.
@@ -531,13 +577,6 @@ void cpqary3_poll_for(cpqary3_t *, cpqary3_command_t *);
 caddr_t cpqary3_alloc_phyctgs_mem(cpqary3_t *, size_t, uint32_t *,
     cpqary3_phyctg_t *, int);
 void cpqary3_free_phyctgs_mem(cpqary3_phyctg_t *, uint8_t);
-
-/*
- * Synchronous command routines.
- */
-cpqary3_command_t *cpqary3_synccmd_alloc(cpqary3_t *, size_t, int);
-void cpqary3_synccmd_free(cpqary3_t *, cpqary3_command_t *);
-int cpqary3_synccmd_send(cpqary3_t *, cpqary3_command_t *, clock_t, int);
 
 /*
  * Interrupt service routines.
@@ -550,19 +589,23 @@ uint32_t cpqary3_isr_hw_simple(caddr_t, caddr_t);
  * Interrupt enable/disable routines.
  */
 void cpqary3_intr_set(cpqary3_t *, boolean_t);
-void cpqary3_lockup_intr_set(cpqary3_t *, boolean_t);
 
 /*
  * Controller initialisation routines.
  */
 int cpqary3_ctlr_init(cpqary3_t *);
+void cpqary3_ctlr_teardown(cpqary3_t *);
+int cpqary3_ctlr_reset(cpqary3_t *);
+int cpqary3_ctlr_ping(cpqary3_t *, int);
 int cpqary3_ctlr_wait_for_state(cpqary3_t *, cpqary3_wait_state_t);
 int cpqary3_ctlr_init_simple(cpqary3_t *);
+void cpqary3_ctlr_teardown_simple(cpqary3_t *);
 int cpqary3_cfgtbl_flush(cpqary3_t *);
 int cpqary3_cfgtbl_transport_has_support(cpqary3_t *, int);
 void cpqary3_cfgtbl_transport_set(cpqary3_t *, int);
 int cpqary3_cfgtbl_transport_confirm(cpqary3_t *, int);
 uint32_t cpqary3_ctlr_get_cmdsoutmax(cpqary3_t *);
+uint32_t cpqary3_ctlr_get_maxsgelements(cpqary3_t *);
 
 /*
  * Device enumeration routines.
@@ -579,20 +622,30 @@ cpqary3_target_t *cpqary3_target_from_addr(cpqary3_t *, struct scsi_address *);
 int cpqary3_setcap(struct scsi_address *, char *, int, int);
 int cpqary3_getcap(struct scsi_address *, char *, int);
 
-void cpqary3_hba_setup(cpqary3_t *);
+int cpqary3_hba_setup(cpqary3_t *);
+void cpqary3_hba_teardown(cpqary3_t *);
 
 void cpqary3_process_finishq(cpqary3_t *);
+void cpqary3_process_abortq(cpqary3_t *);
 
 /*
  * Command object management.
  */
 cpqary3_command_t *cpqary3_command_alloc(cpqary3_t *, cpqary3_command_type_t,
     int);
-cpqary3_command_internal_t *cpqary3_command_internal_alloc(cpqary3_t *,
-    size_t, int);
+int cpqary3_command_attach_internal(cpqary3_t *, cpqary3_command_t *, size_t,
+    int);
 void cpqary3_command_free(cpqary3_command_t *);
 cpqary3_command_t *cpqary3_lookup_inflight(cpqary3_t *, uint32_t);
 void cpqary3_command_reuse(cpqary3_command_t *);
+
+/*
+ * XXX
+ */
+void cpqary3_write_lun_addr_phys(LUNAddr_t *, boolean_t, unsigned, unsigned);
+void cpqary3_write_message_abort_one(cpqary3_command_t *, uint32_t);
+void cpqary3_write_message_abort_all(cpqary3_command_t *, LogDevAddr_t *);
+void cpqary3_write_message_nop(cpqary3_command_t *, int);
 
 /*
  * Device management routines.
@@ -601,6 +654,11 @@ int cpqary3_device_setup(cpqary3_t *);
 void cpqary3_device_teardown(cpqary3_t *);
 uint32_t cpqary3_get32(cpqary3_t *, offset_t);
 void cpqary3_put32(cpqary3_t *, offset_t, uint32_t);
+
+/*
+ * Routines for ioctl(2) handling.
+ */
+int cpqary3_ioctl_passthrough(cpqary3_t *, intptr_t, int, int *);
 
 
 #ifdef	__cplusplus
