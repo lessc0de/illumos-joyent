@@ -23,20 +23,6 @@ cpqary3_round_up(size_t offset)
 	return ((offset + (gran - 1)) & ~(gran - 1));
 }
 
-static void
-cpqary3_set_new_tag(cpqary3_t *cpq, cpqary3_command_t *cpcm)
-{
-	/*
-	 * Grab a new tag number for this command.  We aim to avoid reusing tag
-	 * numbers as much as possible, so as to avoid spurious double
-	 * completion from the controller.
-	 */
-	cpcm->cpcm_tag = cpq->cpq_next_tag;
-	if (++cpq->cpq_next_tag > CPQARY3_MAX_TAG_NUMBER) {
-		cpq->cpq_next_tag = CPQARY3_MIN_TAG_NUMBER;
-	}
-}
-
 static int
 cpqary3_check_command_type(cpqary3_command_type_t type)
 {
@@ -68,10 +54,6 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type,
 
 	cpcm->cpcm_ctlr = cpq;
 	cpcm->cpcm_type = cpqary3_check_command_type(type);
-
-	mutex_enter(&cpq->cpq_mutex);
-	cpqary3_set_new_tag(cpq, cpcm);
-	mutex_exit(&cpq->cpq_mutex);
 
 	size_t contig_size = 0;
 	size_t errorinfo_offset;
@@ -115,7 +97,6 @@ cpqary3_command_alloc(cpqary3_t *cpq, cpqary3_command_type_t type,
 	 * Populate Fields.
 	 */
 	bzero(cpcm->cpcm_va_cmd, contig_size);
-	cpcm->cpcm_va_cmd->Header.Tag.tag_value = cpcm->cpcm_tag;
 	cpcm->cpcm_va_cmd->ErrDesc.Addr = cpcm->cpcm_pa_err;
 	cpcm->cpcm_va_cmd->ErrDesc.Len = sizeof (ErrorInfo_t);
 
@@ -173,12 +154,11 @@ cpqary3_command_reuse(cpqary3_command_t *cpcm)
 	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT));
 	cpcm->cpcm_status = CPQARY3_CMD_STATUS_REUSED;
 
-	cpqary3_set_new_tag(cpq, cpcm);
-
 	/*
-	 * Populate fields.
+	 * Clear the previous tag value.
 	 */
-	cpcm->cpcm_va_cmd->Header.Tag.tag_value = cpcm->cpcm_tag;
+	cpcm->cpcm_tag = 0;
+	cpcm->cpcm_va_cmd->Header.Tag.tag_value = 0;
 
 	mutex_exit(&cpq->cpq_mutex);
 }

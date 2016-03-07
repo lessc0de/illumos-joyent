@@ -232,6 +232,44 @@ cpqary3_retrieve(cpqary3_t *cpq)
 }
 
 /*
+ * Grab a new tag number for this command.  We aim to avoid reusing tag numbers
+ * as much as possible, so as to avoid spurious double completion from the
+ * controller.
+ */
+static void
+cpqary3_set_new_tag(cpqary3_t *cpq, cpqary3_command_t *cpcm)
+{
+	/*
+	 * Loop until we find a tag that is not in use.  The tag space is
+	 * very large (~30 bits) and the maximum number of inflight commands
+	 * is comparitively small (~1024 in current controllers).
+	 */
+	for (;;) {
+		uint32_t new_tag = cpq->cpq_next_tag;
+
+		if (++cpq->cpq_next_tag > CPQARY3_MAX_TAG_NUMBER) {
+			cpq->cpq_next_tag = CPQARY3_MIN_TAG_NUMBER;
+		}
+
+		if (cpqary3_lookup_inflight(cpq, new_tag) != NULL) {
+			/*
+			 * This tag is already used on an inflight command.
+			 * Choose another.
+			 */
+			continue;
+		}
+
+		/*
+		 * Set the tag for the command and also write it into the
+		 * appropriate part of the request block.
+		 */
+		cpcm->cpcm_tag = new_tag;
+		cpcm->cpcm_va_cmd->Header.Tag.tag_value = new_tag;
+		return;
+	}
+}
+
+/*
  * Submit a command to the controller.
  */
 int
@@ -271,6 +309,11 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	 */
 	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_USED));
 	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_USED;
+
+	/*
+	 * Assign a tag that is not currently in use
+	 */
+	cpqary3_set_new_tag(cpq, cpcm);
 
 	/*
 	 * Insert this command into the inflight AVL.
