@@ -242,7 +242,7 @@ cpqary3_set_new_tag(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 	/*
 	 * Loop until we find a tag that is not in use.  The tag space is
 	 * very large (~30 bits) and the maximum number of inflight commands
-	 * is comparitively small (~1024 in current controllers).
+	 * is comparatively small (~1024 in current controllers).
 	 */
 	for (;;) {
 		uint32_t new_tag = cpq->cpq_next_tag;
@@ -324,6 +324,11 @@ cpqary3_submit(cpqary3_t *cpq, cpqary3_command_t *cpcm)
 		    cpcm->cpcm_tag);
 	}
 	avl_insert(&cpq->cpq_inflight, cpcm, where);
+	if (cpq->cpq_stats.cpqs_max_inflight <
+	    avl_numnodes(&cpq->cpq_inflight)) {
+		cpq->cpq_stats.cpqs_max_inflight =
+		    avl_numnodes(&cpq->cpq_inflight);
+	}
 
 	VERIFY(!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_INFLIGHT));
 	cpcm->cpcm_status |= CPQARY3_CMD_STATUS_INFLIGHT;
@@ -947,6 +952,7 @@ cpqary3_ctlr_reset(cpqary3_t *cpq)
 	}
 	cpq->cpq_status |= CPQARY3_CTLR_STATUS_RESETTING;
 	cpq->cpq_last_reset_start = gethrtime();
+	cpq->cpq_stats.cpqs_ctlr_resets++;
 	mutex_exit(&cpq->cpq_mutex);
 
 skip_check:

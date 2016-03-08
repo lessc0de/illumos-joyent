@@ -210,6 +210,14 @@ typedef enum cpqary3_controller_status {
 	CPQARY3_CTLR_STATUS_RESETTING =		(0x1 << 3),
 } cpqary3_controller_status_t;
 
+typedef struct cpqary3_stats {
+	uint64_t cpqs_tran_aborts;
+	uint64_t cpqs_tran_resets;
+	uint64_t cpqs_tran_starts;
+	uint64_t cpqs_ctlr_resets;
+	unsigned cpqs_max_inflight;
+} cpqary3_stats_t;
+
 /*
  * Per Controller Structure
  */
@@ -218,6 +226,7 @@ struct cpqary3 {
 	dev_info_t		*dip;
 	int			cpq_instance;
 	cpqary3_controller_status_t cpq_status;
+	cpqary3_stats_t		cpq_stats;
 
 	/*
 	 * Controller model-specific data.

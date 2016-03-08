@@ -375,6 +375,7 @@ cpqary3_tran_start(struct scsi_address *sa, struct scsi_pkt *pkt)
 	 * Submit the command to the controller.
 	 */
 	mutex_enter(&cpq->cpq_mutex);
+	cpq->cpq_stats.cpqs_tran_starts++;
 	if ((r = cpqary3_submit(cpq, cpcm)) != 0) {
 		mutex_exit(&cpq->cpq_mutex);
 
@@ -433,6 +434,7 @@ again:
 	cpqary3_write_message_nop(cpcm, 15);
 
 	mutex_enter(&cpq->cpq_mutex);
+	cpq->cpq_stats.cpqs_tran_resets++;
 	if (ddi_in_panic()) {
 		goto skip_check;
 	}
@@ -459,9 +461,29 @@ skip_check:
 		return (0);
 	}
 
-	if ((r = cpqary3_poll_for(cpq, cpcm)) == 0 &&
-	    !(cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR) &&
-	    !(cpcm->cpcm_status & CPQARY3_CMD_STATUS_RESET_SENT)) {
+	if ((r = cpqary3_poll_for(cpq, cpcm)) != 0) {
+		VERIFY(r == ETIMEDOUT);
+		VERIFY0(cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLL_COMPLETE);
+
+		/*
+		 * The ping command timed out.  Abandon it now.
+		 */
+		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ABANDONED;
+		cpcm->cpcm_status &= ~CPQARY3_CMD_STATUS_POLLED;
+
+	} else if ((cpcm->cpcm_status & CPQARY3_CMD_STATUS_RESET_SENT) ||
+	    (cpcm->cpcm_status & CPQARY3_CMD_STATUS_ERROR)) {
+		/*
+		 * The command completed in error, or a controller reset
+		 * was sent while we were trying to ping.
+		 */
+		mutex_exit(&cpq->cpq_mutex);
+		cpqary3_command_free(cpcm);
+		mutex_enter(&cpq->cpq_mutex);
+
+	} else {
+		VERIFY(cpcm->cpcm_status & CPQARY3_CMD_STATUS_COMPLETE);
+
 		/*
 		 * The controller is responsive, and a full soft reset would be
 		 * extremely disruptive to the system.  Given our spotty
@@ -473,14 +495,6 @@ skip_check:
 		mutex_exit(&cpq->cpq_mutex);
 		cpqary3_command_free(cpcm);
 		return (1);
-	}
-
-	if (!(cpcm->cpcm_status & CPQARY3_CMD_STATUS_POLL_COMPLETE)) {
-		cpcm->cpcm_status |= CPQARY3_CMD_STATUS_ABANDONED;
-	} else {
-		mutex_exit(&cpq->cpq_mutex);
-		cpqary3_command_free(cpcm);
-		mutex_enter(&cpq->cpq_mutex);
 	}
 
 	/*
@@ -530,6 +544,7 @@ cpqary3_tran_abort(struct scsi_address *sa, struct scsi_pkt *pkt)
 	}
 
 	mutex_enter(&cpq->cpq_mutex);
+	cpq->cpq_stats.cpqs_tran_aborts++;
 	if (pkt != NULL) {
 		/*
 		 * The framework wants us to abort a specific SCSI packet.
@@ -660,11 +675,14 @@ cpqary3_hba_setup(cpqary3_t *cpq)
 	tran->tran_teardown_pkt = cpqary3_tran_teardown_pkt;
 	tran->tran_hba_len = sizeof (cpqary3_command_scsa_t);
 
+#if 0
 	/*
 	 * XXX We should set "tran_interconnect_type" appropriately.
 	 * e.g. to INTERCONNECT_SAS for SAS controllers.  How to tell?
 	 * Who knows.
 	 */
+	tran->tran_interconnect_type = INTERCONNECT_SAS;
+#endif
 
 	if (scsi_hba_attach_setup(cpq->dip, &cpq->cpq_dma_attr, tran,
 	    SCSI_HBA_TRAN_CLONE) != DDI_SUCCESS) {
