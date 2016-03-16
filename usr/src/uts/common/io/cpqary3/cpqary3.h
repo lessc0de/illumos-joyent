@@ -216,6 +216,8 @@ typedef struct cpqary3_stats {
 	uint64_t cpqs_tran_starts;
 	uint64_t cpqs_ctlr_resets;
 	unsigned cpqs_max_inflight;
+	uint64_t cpqs_unclaimed_interrupts;
+	uint64_t cpqs_claimed_interrupts;
 } cpqary3_stats_t;
 
 /*
@@ -271,6 +273,8 @@ struct cpqary3 {
 	uint32_t		cpq_last_heartbeat;
 	hrtime_t		cpq_last_heartbeat_time;
 
+	hrtime_t		cpq_last_interrupt_claimed;
+	hrtime_t		cpq_last_interrupt_unclaimed;
 	hrtime_t		cpq_last_discovery;
 	hrtime_t		cpq_last_reset_start;
 	hrtime_t		cpq_last_reset_finish;

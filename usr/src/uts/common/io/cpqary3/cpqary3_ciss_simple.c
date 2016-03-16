@@ -20,9 +20,13 @@ cpqary3_isr_hw_simple(caddr_t arg1, caddr_t arg2)
 {
 	cpqary3_t *cpq = (cpqary3_t *)arg1;
 	uint32_t isr = cpqary3_get32(cpq, CISS_I2O_INTERRUPT_STATUS);
+	hrtime_t now = gethrtime();
 
 	mutex_enter(&cpq->cpq_mutex);
 	if (!(cpq->cpq_status & CPQARY3_CTLR_STATUS_RUNNING)) {
+		cpq->cpq_stats.cpqs_unclaimed_interrupts++;
+		cpq->cpq_last_interrupt_unclaimed = now;
+
 		/*
 		 * We should not be receiving interrupts from the controller
 		 * while the driver is not running.
@@ -35,6 +39,9 @@ cpqary3_isr_hw_simple(caddr_t arg1, caddr_t arg2)
 	 * Check to see if this interrupt came from the device:
 	 */
 	if ((isr & cpq->cpq_board->bd_intrpendmask) == 0) {
+		cpq->cpq_stats.cpqs_unclaimed_interrupts++;
+		cpq->cpq_last_interrupt_unclaimed = now;
+
 		/*
 		 * Check to see if the firmware has come to rest.  If it has,
 		 * this routine will panic the system.
@@ -44,6 +51,9 @@ cpqary3_isr_hw_simple(caddr_t arg1, caddr_t arg2)
 		mutex_exit(&cpq->cpq_mutex);
 		return (DDI_INTR_UNCLAIMED);
 	}
+
+	cpq->cpq_stats.cpqs_claimed_interrupts++;
+	cpq->cpq_last_interrupt_claimed = now;
 
 	/*
 	 * The interrupt was from our controller, so collect any pending
