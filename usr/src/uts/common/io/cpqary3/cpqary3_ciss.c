@@ -149,12 +149,6 @@ cpqary3_periodic(void *arg)
 	cpqary3_lockup_check(cpq);
 
 	/*
-	 * Run the retrieval routine, in case the controller has become
-	 * stuck or we have somehow missed an interrupt.
-	 */
-	(void) cpqary3_retrieve(cpq);
-
-	/*
 	 * Check inflight commands to see if they have timed out.
 	 */
 	for (cpcm = avl_first(&cpq->cpq_inflight); cpcm != NULL;
@@ -200,11 +194,6 @@ cpqary3_periodic(void *arg)
 			cpcm->cpcm_status |= CPQARY3_CMD_STATUS_TIMEOUT;
 		}
 	}
-
-	/*
-	 * Process the completion queue.
-	 */
-	(void) cpqary3_process_finishq(cpq);
 
 	/*
 	 * Process the abort queue.
