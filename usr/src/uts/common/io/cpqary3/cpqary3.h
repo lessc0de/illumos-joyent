@@ -292,6 +292,8 @@ struct cpqary3 {
 	/*
 	 * Controller interrupt handler registration.
 	 */
+	int			cpq_interrupt_type;
+	int			cpq_interrupt_cap;
 	ddi_intr_handle_t	cpq_interrupts[1];
 	int			cpq_ninterrupts;
 
